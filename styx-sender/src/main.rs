@@ -236,7 +236,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 result = transport.recv(), if transport.is_connected() => {
                     match result {
-                        Ok(Event::ReturnToSender { from_bottom, source_height: _ }) => {
+                        Ok(Event::ReturnToSender { from_bottom, source_height }) => {
+                            wayland_capture.set_max_from_bottom(source_height);
                             log::info!("return signal received (from_bottom={from_bottom:.0})");
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
 
