@@ -123,6 +123,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("styx-receiver running (return_edge={:?})", return_edge);
 
+    // Periodically recreate the CGEventSource and recompute display bounds.
+    // This fixes stale event injection after macOS sleep/wake cycles and
+    // handles monitor configuration changes.
+    let mut reinit_timer = time::interval(Duration::from_secs(30));
+    reinit_timer.tick().await; // consume the immediate first tick
+
     loop {
         // Wait for a connection.
         log::info!("waiting for connection...");
@@ -172,6 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         log::error!("accept error: {e}");
                         continue;
                     }
+                },
+                _ = reinit_timer.tick() => {
+                    injector.reinit();
+                    continue;
                 },
                 _ = sigterm.recv() => {
                     injector.release_all_keys();

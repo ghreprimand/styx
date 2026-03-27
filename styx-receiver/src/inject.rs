@@ -88,6 +88,26 @@ impl Injector {
         })
     }
 
+    /// Recreate the CGEventSource and recompute display geometry.
+    /// Fixes stale event injection after macOS sleep/wake cycles.
+    pub fn reinit(&mut self) {
+        match CGEventSource::new(CGEventSourceStateID::CombinedSessionState) {
+            Ok(source) => self.source = source,
+            Err(_) => {
+                log::error!("reinit: failed to create CGEventSource");
+                return;
+            }
+        }
+        self.display_bounds = compute_display_bounds();
+        self.edge_span = compute_edge_span(self.return_edge);
+        log::info!(
+            "reinit: display bounds: x=[{}, {}] y=[{}, {}], edge span: [{}, {}]",
+            self.display_bounds.min_x, self.display_bounds.max_x,
+            self.display_bounds.min_y, self.display_bounds.max_y,
+            self.edge_span.min, self.edge_span.max
+        );
+    }
+
     /// Returns true if the cursor hit the return edge.
     pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
         let new_x = (self.cursor_pos.x + dx).clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0);
