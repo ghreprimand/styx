@@ -82,6 +82,17 @@ fn expand_path(path: &str) -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join(rest);
         }
+        #[cfg(unix)]
+        unsafe {
+            let uid = libc::getuid();
+            let pw = libc::getpwuid(uid);
+            if !pw.is_null() {
+                let dir = std::ffi::CStr::from_ptr((*pw).pw_dir);
+                if let Ok(s) = dir.to_str() {
+                    return PathBuf::from(s).join(rest);
+                }
+            }
+        }
     }
     PathBuf::from(path)
 }
@@ -239,6 +250,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         end_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport, &config.sender.heartbeat).await;
                         transport.disconnect();
                         transport.connect().await?;
+                        missed_heartbeats = 0;
+                        heartbeat_interval = time::interval(Duration::from_millis(
+                            config.sender.heartbeat.idle_interval_ms,
+                        ));
                     }
                 }
             }
@@ -251,6 +266,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     transport.disconnect();
                     transport.connect().await?;
                     missed_heartbeats = 0;
+                    heartbeat_interval = time::interval(Duration::from_millis(
+                        config.sender.heartbeat.idle_interval_ms,
+                    ));
                 } else {
                     let _ = transport.send(&Event::Heartbeat).await;
                     missed_heartbeats += 1;

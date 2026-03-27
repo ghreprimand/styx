@@ -52,6 +52,18 @@ fn expand_path(path: &str) -> std::path::PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             return std::path::PathBuf::from(home).join(rest);
         }
+        // Fallback: /etc/passwd home directory via libc.
+        #[cfg(unix)]
+        unsafe {
+            let uid = libc::getuid();
+            let pw = libc::getpwuid(uid);
+            if !pw.is_null() {
+                let dir = std::ffi::CStr::from_ptr((*pw).pw_dir);
+                if let Ok(s) = dir.to_str() {
+                    return std::path::PathBuf::from(s).join(rest);
+                }
+            }
+        }
     }
     std::path::PathBuf::from(path)
 }
