@@ -1,5 +1,7 @@
 # Clipboard Sync Design
 
+> **Status: Implemented.** This document was written as a design spec and the feature has been built as described below.
+
 Text-only clipboard sharing between the Linux sender and macOS receiver. Copy on either machine, paste on either machine.
 
 ## How It Works

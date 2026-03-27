@@ -28,6 +28,8 @@ The receiver injects these events into macOS using the Core Graphics accessibili
 
 TCP eliminates the stuck key problem entirely. Delivery is guaranteed by the kernel -- no dropped events, no acknowledgment protocol needed. For HID events on a LAN, the latency difference between TCP and UDP is imperceptible.
 
+Text clipboard is synced automatically on each transition. When the cursor crosses from Linux to Mac, the Linux clipboard is pushed to macOS. When it returns, the macOS clipboard is pushed back. Copy on either machine, paste on either machine. Requires `wl-clipboard` (`wl-paste`/`wl-copy`) on the Linux side; macOS uses the built-in `pbcopy`/`pbpaste`.
+
 ```
 Linux (sender)                            Mac (receiver)
 +-----------------+                      +-----------------+
@@ -64,6 +66,7 @@ Portrait (rotated) monitors are handled automatically -- styx accounts for Hyprl
 - evdev development library (`libevdev-dev`)
 - Rust toolchain
 - User must be in the `input` group for evdev access (`sudo usermod -aG input $USER`, requires re-login)
+- `wl-clipboard` (`wl-paste`, `wl-copy`) for clipboard sync
 
 **Receiver (macOS):**
 - macOS Ventura (13.0) or later
@@ -215,7 +218,6 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 - Hyprland only. The sender depends on wlr-layer-shell and Hyprland's IPC socket. Other Wayland compositors that support wlr-layer-shell may work but are untested.
 - macOS only on the receiving end. The receiver uses Core Graphics APIs that are macOS-specific.
 - Linux to Mac only. There is no Mac-to-Linux direction.
-- No clipboard sharing. Keyboard and mouse events only.
 - No encryption. Use on a trusted network or behind a VPN.
 - Single sender, single receiver. No multi-machine mesh.
 
