@@ -254,7 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
 
                             if let Ok(geom) = hyprland::get_monitor(&config.sender.monitor).await {
-                                let x = geom.x + 100;
+                                let x = geom.x + 2;
                                 // Map the pixel distance from bottom to our monitor.
                                 let y = geom.y + geom.height - from_bottom.round() as i32;
                                 let y = y.clamp(geom.y, geom.y + geom.height - 1);
