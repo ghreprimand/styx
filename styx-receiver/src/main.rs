@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
     log::info!("listening on {addr}");
 
-    let mut transport = ReceiverTransport::from_listener(listener);
+    let mut transport = ReceiverTransport::new();
     let mut injector = Injector::new(return_edge)?;
 
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -102,19 +102,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for initial connection.
     log::info!("waiting for connection...");
-    transport.accept().await?;
+    let (stream, peer) = listener.accept().await?;
+    log::info!("accepted connection from {peer}");
+    transport.set_stream(stream);
     injector.reset_cursor_to_entry();
 
     loop {
         tokio::select! {
-            // Listen for new connections concurrently with processing events.
-            result = listener_accept(&transport) => {
+            result = listener.accept() => {
                 match result {
                     Ok((stream, peer)) => {
                         log::info!("new connection from {peer}, replacing previous");
                         injector.release_all_keys();
                         transport.disconnect();
-                        transport.replace_stream(stream);
+                        transport.set_stream(stream);
                         injector.reset_cursor_to_entry();
                     }
                     Err(e) => {
@@ -154,15 +155,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
-
-/// Accept on the listener without borrowing ReceiverTransport mutably.
-async fn listener_accept(
-    transport: &ReceiverTransport,
-) -> io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
-    transport.listener.accept().await
-}
-
-use std::io;
 
 async fn handle_event(
     injector: &mut Injector,
