@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Wait for a sender to connect.
         log::info!("waiting for connection...");
         transport.accept().await?;
-        injector.reset_cursor_to_center();
+        injector.reset_cursor_to_entry();
 
         // Event loop for this connection.
         loop {
@@ -142,7 +142,7 @@ async fn handle_event(
         }
         Event::CaptureBegin => {
             log::info!("capture begin");
-            injector.reset_cursor_to_center();
+            injector.reset_cursor_to_entry();
         }
         Event::CaptureEnd => {
             log::info!("capture end");
