@@ -63,10 +63,10 @@ pub enum Edge {
 impl Edge {
     fn anchor(&self) -> Anchor {
         match self {
-            Edge::Left => Anchor::Left,
-            Edge::Right => Anchor::Right,
-            Edge::Top => Anchor::Top,
-            Edge::Bottom => Anchor::Bottom,
+            Edge::Left => Anchor::Left | Anchor::Top | Anchor::Bottom,
+            Edge::Right => Anchor::Right | Anchor::Top | Anchor::Bottom,
+            Edge::Top => Anchor::Top | Anchor::Left | Anchor::Right,
+            Edge::Bottom => Anchor::Bottom | Anchor::Left | Anchor::Right,
         }
     }
 }

@@ -43,7 +43,7 @@ impl Injector {
 
         let bounds = compute_display_bounds();
         let cursor_pos = CGPoint::new(
-            (bounds.min_x + bounds.max_x) / 2.0,
+            bounds.max_x - 2.0,
             (bounds.min_y + bounds.max_y) / 2.0,
         );
 
@@ -198,9 +198,12 @@ impl Injector {
         }
     }
 
-    pub fn reset_cursor_to_center(&mut self) {
+    pub fn reset_cursor_to_entry(&mut self) {
+        // Place cursor at the right edge of the rightmost display, vertically
+        // centered. This is where the cursor "enters" from the Linux machine
+        // (which sits physically to the right of the Mac).
         self.cursor_pos = CGPoint::new(
-            (self.display_bounds.min_x + self.display_bounds.max_x) / 2.0,
+            self.display_bounds.max_x - 2.0,
             (self.display_bounds.min_y + self.display_bounds.max_y) / 2.0,
         );
     }
