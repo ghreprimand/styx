@@ -127,6 +127,7 @@ struct State {
     scroll_discrete_pending: bool,
     edge: Edge,
     monitor_size: (i32, i32),
+    entry_zone: f64,
 }
 
 struct Inner {
@@ -145,7 +146,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new(monitor: &str, edge: Edge) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(monitor: &str, edge: Edge, entry_zone: f64) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = Connection::connect_to_env()?;
         let (g, mut queue) = registry_queue_init::<State>(&conn)?;
         let qh = queue.handle();
@@ -195,6 +196,7 @@ impl Capture {
             scroll_discrete_pending: false,
             edge,
             monitor_size: (0, 0),
+            entry_zone: entry_zone.clamp(0.01, 1.0),
         };
 
         // Read wl_output globals.
@@ -502,8 +504,15 @@ impl Dispatch<WlPointer, ()> for State {
                                 if w > 0.0 { (surface_x / w).clamp(0.0, 1.0) } else { 0.5 }
                             }
                         };
+                        // Block crossover outside the entry zone.
+                        let zone_start = 1.0 - state.entry_zone;
+                        if edge_fraction < zone_start {
+                            // Don't grab -- let the pointer pass through.
+                            return;
+                        }
+                        let remapped = ((edge_fraction - zone_start) / state.entry_zone).clamp(0.0, 1.0);
                         state.grab(&surface, pointer, serial);
-                        state.pending_events.push_back(CaptureEvent::Begin { edge_fraction });
+                        state.pending_events.push_back(CaptureEvent::Begin { edge_fraction: remapped });
                     }
                 }
             }
