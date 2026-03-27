@@ -153,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .parse()?;
 
     let mut transport = SenderTransport::new(addr);
-    let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge)?;
+    let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge, config.sender.entry_zone)?;
     let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
     let async_evdev = AsyncEvdev::new(&evdev_capture)?;
 
@@ -198,13 +198,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     continue;
                                 }
                             }
-                            // Block crossover above the entry zone.
-                            let zone = config.sender.entry_zone.clamp(0.01, 1.0);
-                            let zone_start = 1.0 - zone;
-                            if edge_fraction < zone_start {
-                                wayland_capture.release();
-                                continue;
-                            }
                             return_cooldown = None;
                             capturing = true;
                             missed_heartbeats = 0;
@@ -223,12 +216,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for code in evdev_capture.held_modifiers() {
                                 let _ = transport.send(&Event::KeyPress { code }).await;
                             }
-                            // Remap from entry_zone of sender monitor to full receiver screen.
-                            // e.g. entry_zone=0.5: sender fraction 0.5..1.0 → receiver 0.0..1.0
-                            let zone = config.sender.entry_zone.clamp(0.01, 1.0);
-                            let zone_start = 1.0 - zone;
-                            let remapped = ((edge_fraction - zone_start) / zone).clamp(0.0, 1.0);
-                            let _ = transport.send(&Event::CaptureBegin { edge_fraction: remapped }).await;
+                            // edge_fraction is already remapped by the capture layer.
+                            let _ = transport.send(&Event::CaptureBegin { edge_fraction }).await;
                             log::info!("capture active");
                         }
                         CaptureEvent::Input(event) => {
