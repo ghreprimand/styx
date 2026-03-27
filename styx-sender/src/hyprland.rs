@@ -17,7 +17,6 @@ struct Monitor {
 pub struct MonitorGeometry {
     pub x: i32,
     pub y: i32,
-    pub width: i32,
     pub height: i32,
 }
 
@@ -46,15 +45,14 @@ pub async fn get_monitor(name: &str) -> Result<MonitorGeometry, Box<dyn std::err
         .ok_or_else(|| format!("monitor '{}' not found via Hyprland IPC", name))?;
     // Hyprland reports native (pre-rotation) width/height.
     // Swap for 90° (1) and 270° (3) transforms.
-    let (w, h) = if mon.transform == 1 || mon.transform == 3 {
-        (mon.height, mon.width)
+    let h = if mon.transform == 1 || mon.transform == 3 {
+        mon.width
     } else {
-        (mon.width, mon.height)
+        mon.height
     };
     Ok(MonitorGeometry {
         x: mon.x,
         y: mon.y,
-        width: w,
         height: h,
     })
 }

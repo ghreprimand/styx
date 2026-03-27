@@ -14,9 +14,6 @@ impl ReceiverTransport {
         ReceiverTransport { stream: None }
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.stream.is_some()
-    }
 
     pub async fn recv(&mut self) -> Result<Event, styx_proto::DecodeError> {
         let Some(stream) = self.stream.as_mut() else {
