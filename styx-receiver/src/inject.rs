@@ -234,10 +234,10 @@ fn entry_point(bounds: &DisplayBounds, return_edge: Edge, fraction: f64) -> CGPo
     let fx = bounds.min_x + fraction * (bounds.max_x - bounds.min_x);
     let fy = bounds.min_y + fraction * (bounds.max_y - bounds.min_y);
     match return_edge {
-        Edge::Right => CGPoint::new(bounds.min_x + 2.0, fy),
-        Edge::Left => CGPoint::new(bounds.max_x - 2.0, fy),
-        Edge::Bottom => CGPoint::new(fx, bounds.min_y + 2.0),
-        Edge::Top => CGPoint::new(fx, bounds.max_y - 2.0),
+        Edge::Right => CGPoint::new(bounds.max_x - 2.0, fy),
+        Edge::Left => CGPoint::new(bounds.min_x + 2.0, fy),
+        Edge::Bottom => CGPoint::new(fx, bounds.max_y - 2.0),
+        Edge::Top => CGPoint::new(fx, bounds.min_y + 2.0),
     }
 }
 

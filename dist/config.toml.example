@@ -12,6 +12,12 @@ edge = "left"
 # Find yours with: ls /dev/input/by-id/ | grep kbd
 # keyboard_device = "/dev/input/by-id/usb-Example_Keyboard-event-kbd"
 
+# Fraction of the sender's monitor height (from the bottom) that maps to
+# the receiver's full screen height. 0.5 means the bottom half of the
+# sender's monitor maps to the receiver's full height; crossing above
+# this zone is blocked. Default: 1.0 (full height, no remapping).
+# entry_zone = 0.5
+
 [sender.heartbeat]
 active_interval_ms = 1000
 idle_interval_ms = 5000
