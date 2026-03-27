@@ -10,12 +10,21 @@ use core_graphics::geometry::CGPoint;
 
 use styx_keymap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 pub struct Injector {
     source: CGEventSource,
     held_keys: HashSet<u32>,
     button_state: ButtonState,
     cursor_pos: CGPoint,
     display_bounds: DisplayBounds,
+    return_edge: Edge,
 }
 
 struct ButtonState {
@@ -37,15 +46,12 @@ const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
 impl Injector {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(return_edge: Edge) -> Result<Self, Box<dyn std::error::Error>> {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| "failed to create CGEventSource")?;
 
         let bounds = compute_display_bounds();
-        let cursor_pos = CGPoint::new(
-            bounds.max_x - 2.0,
-            (bounds.min_y + bounds.max_y) / 2.0,
-        );
+        let cursor_pos = entry_point(&bounds, return_edge);
 
         Ok(Injector {
             source,
@@ -57,10 +63,11 @@ impl Injector {
             },
             cursor_pos,
             display_bounds: bounds,
+            return_edge,
         })
     }
 
-    /// Returns true if the cursor hit the right edge (should send ReturnToSender).
+    /// Returns true if the cursor hit the return edge.
     pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
         let new_x = (self.cursor_pos.x + dx).clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0);
         let new_y = (self.cursor_pos.y + dy).clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0);
@@ -87,8 +94,12 @@ impl Injector {
             event.post(CGEventTapLocation::HID);
         }
 
-        // Check right edge hit for return signal.
-        new_x >= self.display_bounds.max_x - 1.0
+        match self.return_edge {
+            Edge::Right => new_x >= self.display_bounds.max_x - 1.0,
+            Edge::Left => new_x <= self.display_bounds.min_x,
+            Edge::Bottom => new_y >= self.display_bounds.max_y - 1.0,
+            Edge::Top => new_y <= self.display_bounds.min_y,
+        }
     }
 
     pub fn inject_mouse_button(&mut self, button: u32, state: u8) {
@@ -153,7 +164,6 @@ impl Injector {
     }
 
     pub fn inject_scroll(&mut self, axis: u8, value: f64) {
-        // axis 0 = vertical, axis 1 = horizontal.
         let (v, h) = if axis == 0 {
             (value as i32, 0i32)
         } else {
@@ -186,7 +196,6 @@ impl Injector {
             }
         }
 
-        // Release mouse buttons.
         if self.button_state.left {
             self.inject_mouse_button(BTN_LEFT, 0);
         }
@@ -199,13 +208,18 @@ impl Injector {
     }
 
     pub fn reset_cursor_to_entry(&mut self) {
-        // Place cursor at the right edge of the rightmost display, vertically
-        // centered. This is where the cursor "enters" from the Linux machine
-        // (which sits physically to the right of the Mac).
-        self.cursor_pos = CGPoint::new(
-            self.display_bounds.max_x - 2.0,
-            (self.display_bounds.min_y + self.display_bounds.max_y) / 2.0,
-        );
+        self.cursor_pos = entry_point(&self.display_bounds, self.return_edge);
+    }
+}
+
+fn entry_point(bounds: &DisplayBounds, return_edge: Edge) -> CGPoint {
+    let cx = (bounds.min_x + bounds.max_x) / 2.0;
+    let cy = (bounds.min_y + bounds.max_y) / 2.0;
+    match return_edge {
+        Edge::Right => CGPoint::new(bounds.max_x - 2.0, cy),
+        Edge::Left => CGPoint::new(bounds.min_x + 2.0, cy),
+        Edge::Bottom => CGPoint::new(cx, bounds.max_y - 2.0),
+        Edge::Top => CGPoint::new(cx, bounds.min_y + 2.0),
     }
 }
 
@@ -227,7 +241,6 @@ fn compute_display_bounds() -> DisplayBounds {
     }
 
     if min_x >= max_x {
-        // Fallback for single display.
         return DisplayBounds {
             min_x: 0.0,
             min_y: 0.0,

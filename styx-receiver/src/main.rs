@@ -10,7 +10,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use styx_proto::Event;
 
-use inject::Injector;
+use inject::{Edge, Injector};
 use transport::ReceiverTransport;
 
 #[derive(Parser)]
@@ -29,6 +29,22 @@ struct Config {
 struct ReceiverConfig {
     listen_host: String,
     listen_port: u16,
+    #[serde(default = "default_return_edge")]
+    return_edge: String,
+}
+
+fn default_return_edge() -> String {
+    "right".to_string()
+}
+
+fn parse_edge(s: &str) -> Result<Edge, String> {
+    match s.to_lowercase().as_str() {
+        "left" => Ok(Edge::Left),
+        "right" => Ok(Edge::Right),
+        "top" => Ok(Edge::Top),
+        "bottom" => Ok(Edge::Bottom),
+        _ => Err(format!("invalid edge: '{}' (expected left/right/top/bottom)", s)),
+    }
 }
 
 fn expand_path(path: &str) -> std::path::PathBuf {
@@ -53,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let cli = Cli::parse();
     let config = load_config(&cli.config)?;
+    let return_edge = parse_edge(&config.receiver.return_edge)?;
 
     let addr: SocketAddr = format!(
         "{}:{}",
@@ -61,20 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .parse()?;
 
     let mut transport = ReceiverTransport::bind(addr).await?;
-    let mut injector = Injector::new()?;
+    let mut injector = Injector::new(return_edge)?;
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    log::info!("styx-receiver running");
+    log::info!("styx-receiver running (return_edge={:?})", return_edge);
 
     loop {
-        // Wait for a sender to connect.
         log::info!("waiting for connection...");
         transport.accept().await?;
         injector.reset_cursor_to_entry();
 
-        // Event loop for this connection.
         loop {
             tokio::select! {
                 result = transport.recv(), if transport.is_connected() => {
@@ -113,7 +128,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Returns true if the connection loop should break (to wait for a new connection).
 async fn handle_event(
     injector: &mut Injector,
     transport: &mut ReceiverTransport,
@@ -151,9 +165,7 @@ async fn handle_event(
         Event::Heartbeat => {
             let _ = transport.send(&Event::HeartbeatAck).await;
         }
-        Event::ReturnToSender | Event::HeartbeatAck => {
-            // Not expected from sender. Ignore.
-        }
+        Event::ReturnToSender | Event::HeartbeatAck => {}
     }
     false
 }

@@ -7,9 +7,10 @@ receiver_port = 4242
 monitor = "DP-1"
 edge = "left"
 
-# evdev device path for keyboard capture.
+# evdev device path for keyboard capture. Optional -- if omitted, styx
+# auto-detects the first keyboard in /dev/input/by-id/.
 # Find yours with: ls /dev/input/by-id/ | grep kbd
-keyboard_device = "/dev/input/by-id/usb-Example_Keyboard-event-kbd"
+# keyboard_device = "/dev/input/by-id/usb-Example_Keyboard-event-kbd"
 
 [sender.heartbeat]
 active_interval_ms = 1000
@@ -20,3 +21,8 @@ miss_threshold = 3
 [receiver]
 listen_host = "0.0.0.0"
 listen_port = 4242
+
+# The edge of the Mac's display that faces the Linux machine. When the
+# cursor hits this edge, control returns to the sender.
+# Options: left, right, top, bottom (default: right)
+return_edge = "right"

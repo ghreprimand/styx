@@ -37,7 +37,8 @@ struct SenderConfig {
     receiver_port: u16,
     monitor: String,
     edge: String,
-    keyboard_device: String,
+    #[serde(default)]
+    keyboard_device: Option<String>,
     #[serde(default)]
     heartbeat: HeartbeatConfig,
 }
@@ -93,12 +94,38 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
+fn detect_keyboard() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let by_id = std::fs::read_dir("/dev/input/by-id/")?;
+    let mut candidates: Vec<PathBuf> = by_id
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            name.contains("kbd") && name.contains("event") && !name.contains("if0")
+        })
+        .collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no keyboard found in /dev/input/by-id/; set keyboard_device in config".into())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let cli = Cli::parse();
     let config = load_config(&cli.config)?;
     let edge = parse_edge(&config.sender.edge)?;
+
+    let kbd_path = match &config.sender.keyboard_device {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let detected = detect_keyboard()?;
+            log::info!("auto-detected keyboard: {}", detected.display());
+            detected
+        }
+    };
 
     let addr: SocketAddr = format!(
         "{}:{}",
@@ -108,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut transport = SenderTransport::new(addr);
     let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge)?;
-    let mut evdev_capture = EvdevCapture::open(&PathBuf::from(&config.sender.keyboard_device))?;
+    let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
     let async_evdev = AsyncEvdev::new(&evdev_capture)?;
 
     let mut sigterm = signal(SignalKind::terminate())?;
