@@ -154,7 +154,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             };
-            log::info!("event: {event:?}");
             handle_event(&mut injector, &mut transport, event).await;
         }
 
@@ -203,10 +202,7 @@ async fn handle_event(
             injector.release_all_keys();
         }
         Event::Heartbeat => {
-            log::info!("heartbeat received, sending ack");
-            if let Err(e) = transport.send(&Event::HeartbeatAck).await {
-                log::error!("failed to send heartbeat ack: {e}");
-            }
+            let _ = transport.send(&Event::HeartbeatAck).await;
         }
         Event::ReturnToSender | Event::HeartbeatAck => {}
     }
