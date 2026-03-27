@@ -186,7 +186,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             };
-            handle_event(&mut injector, &mut transport, &mut last_clip_hash, event).await;
+            let returned = handle_event(&mut injector, &mut transport, &mut last_clip_hash, event).await;
+            if returned {
+                // Cursor returned to sender. Drain events until we get
+                // CaptureEnd to avoid sending duplicate ReturnToSender
+                // from buffered mouse motion events.
+                loop {
+                    match time::timeout(RECV_TIMEOUT, transport.recv()).await {
+                        Ok(Ok(Event::CaptureEnd)) => {
+                            log::info!("capture end");
+                            injector.release_all_keys();
+                            break;
+                        }
+                        Ok(Ok(Event::CaptureBegin { from_bottom, source_height })) => {
+                            log::info!("capture begin (from_bottom={from_bottom:.0}, source_height={source_height:.0})");
+                            injector.place_cursor_from_bottom(from_bottom);
+                            break;
+                        }
+                        Ok(Ok(_)) => continue, // discard buffered events
+                        Ok(Err(_)) | Err(_) => break, // error or timeout
+                    }
+                }
+            }
         }
 
         injector.release_all_keys();
@@ -199,12 +220,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Returns true if ReturnToSender was sent (caller should drain until CaptureEnd).
 async fn handle_event(
     injector: &mut Injector,
     transport: &mut ReceiverTransport,
     last_clip_hash: &mut u64,
     event: Event,
-) {
+) -> bool {
     match event {
         Event::MouseMotion { dx, dy } => {
             let hit_edge = injector.inject_mouse_motion(dx, dy);
@@ -223,6 +245,7 @@ async fn handle_event(
                 }
 
                 let _ = transport.send(&Event::ReturnToSender { from_bottom, source_height }).await;
+                return true;
             }
         }
         Event::MouseButton { button, state } => {
@@ -254,4 +277,5 @@ async fn handle_event(
         }
         Event::ReturnToSender { .. } | Event::HeartbeatAck => {}
     }
+    false
 }
