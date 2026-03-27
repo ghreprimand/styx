@@ -213,7 +213,9 @@ impl Injector {
 
     pub fn inject_scroll(&mut self, axis: u8, value: f64) {
         let (v, h) = if axis == 0 {
-            (value as i32, 0i32)
+            // Negate vertical scroll: Linux/Wayland and macOS use opposite
+            // sign conventions for scroll direction.
+            (-(value as i32), 0i32)
         } else {
             (0i32, value as i32)
         };
