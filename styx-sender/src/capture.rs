@@ -73,7 +73,7 @@ impl Edge {
 
 #[derive(Debug)]
 pub enum CaptureEvent {
-    Begin { edge_fraction: f64 },
+    Begin { from_bottom: f64, source_height: f64 },
     Input(Event),
 }
 
@@ -127,7 +127,6 @@ struct State {
     scroll_discrete_pending: bool,
     edge: Edge,
     monitor_size: (i32, i32),
-    entry_zone: f64,
 }
 
 struct Inner {
@@ -146,7 +145,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new(monitor: &str, edge: Edge, entry_zone: f64) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(monitor: &str, edge: Edge) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = Connection::connect_to_env()?;
         let (g, mut queue) = registry_queue_init::<State>(&conn)?;
         let qh = queue.handle();
@@ -196,7 +195,6 @@ impl Capture {
             scroll_discrete_pending: false,
             edge,
             monitor_size: (0, 0),
-            entry_zone: entry_zone.clamp(0.01, 1.0),
         };
 
         // Read wl_output globals.
@@ -494,25 +492,18 @@ impl Dispatch<WlPointer, ()> for State {
             wl_pointer::Event::Enter { serial, surface, surface_x, surface_y, .. } => {
                 if let Some(window) = &state.window {
                     if window.surface == surface {
-                        let edge_fraction = match state.edge {
+                        let (from_bottom, source_height) = match state.edge {
                             Edge::Left | Edge::Right => {
                                 let h = state.monitor_size.1 as f64;
-                                if h > 0.0 { (surface_y / h).clamp(0.0, 1.0) } else { 0.5 }
+                                (h - surface_y, h)
                             }
                             Edge::Top | Edge::Bottom => {
                                 let w = state.monitor_size.0 as f64;
-                                if w > 0.0 { (surface_x / w).clamp(0.0, 1.0) } else { 0.5 }
+                                (w - surface_x, w)
                             }
                         };
-                        // Block crossover outside the entry zone.
-                        let zone_start = 1.0 - state.entry_zone;
-                        if edge_fraction < zone_start {
-                            // Don't grab -- let the pointer pass through.
-                            return;
-                        }
-                        let remapped = ((edge_fraction - zone_start) / state.entry_zone).clamp(0.0, 1.0);
                         state.grab(&surface, pointer, serial);
-                        state.pending_events.push_back(CaptureEvent::Begin { edge_fraction: remapped });
+                        state.pending_events.push_back(CaptureEvent::Begin { from_bottom, source_height });
                     }
                 }
             }

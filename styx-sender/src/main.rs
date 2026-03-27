@@ -39,17 +39,9 @@ struct SenderConfig {
     edge: String,
     #[serde(default)]
     keyboard_device: Option<String>,
-    /// The fraction of the sender's monitor height (from the bottom) that maps
-    /// to the receiver's full screen. For example, 0.5 means the bottom half
-    /// of the sender's monitor maps to the receiver's full height. Default 1.0
-    /// (full height, no remapping).
-    #[serde(default = "default_entry_zone")]
-    entry_zone: f64,
     #[serde(default)]
     heartbeat: HeartbeatConfig,
 }
-
-fn default_entry_zone() -> f64 { 1.0 }
 
 #[derive(Deserialize)]
 struct HeartbeatConfig {
@@ -153,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .parse()?;
 
     let mut transport = SenderTransport::new(addr);
-    let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge, config.sender.entry_zone)?;
+    let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge)?;
     let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
     let async_evdev = AsyncEvdev::new(&evdev_capture)?;
 
@@ -188,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break 'outer;
                     };
                     match event {
-                        CaptureEvent::Begin { edge_fraction } => {
+                        CaptureEvent::Begin { from_bottom, source_height } => {
                             if capturing {
                                 continue;
                             }
@@ -216,8 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for code in evdev_capture.held_modifiers() {
                                 let _ = transport.send(&Event::KeyPress { code }).await;
                             }
-                            // edge_fraction is already remapped by the capture layer.
-                            let _ = transport.send(&Event::CaptureBegin { edge_fraction }).await;
+                            let _ = transport.send(&Event::CaptureBegin { from_bottom, source_height }).await;
                             log::info!("capture active");
                         }
                         CaptureEvent::Input(event) => {
@@ -245,17 +236,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 result = transport.recv(), if transport.is_connected() => {
                     match result {
-                        Ok(Event::ReturnToSender { edge_fraction }) => {
-                            log::info!("return signal received (fraction={edge_fraction:.2})");
+                        Ok(Event::ReturnToSender { from_bottom, source_height: _ }) => {
+                            log::info!("return signal received (from_bottom={from_bottom:.0})");
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
 
                             if let Ok(geom) = hyprland::get_monitor(&config.sender.monitor).await {
-                                // Remap from full receiver screen back to entry_zone.
-                                let zone = config.sender.entry_zone.clamp(0.01, 1.0);
-                                let zone_start = 1.0 - zone;
-                                let mapped = zone_start + edge_fraction * zone;
                                 let x = geom.x + 100;
-                                let y = geom.y + (mapped * geom.height as f64) as i32;
+                                // Map the pixel distance from bottom to our monitor.
+                                let y = geom.y + geom.height - from_bottom.round() as i32;
+                                let y = y.clamp(geom.y, geom.y + geom.height - 1);
                                 let _ = hyprland::warp_cursor(x, y).await;
                             }
 

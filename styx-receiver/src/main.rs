@@ -137,7 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         log::info!("accepted connection from {peer}");
         transport.set_stream(stream);
-        injector.reset_cursor_to_entry(0.5);
 
         // Process events on this connection until it dies.
         // Also accept new connections -- if the sender reconnects, drop the
@@ -165,7 +164,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         injector.release_all_keys();
                         transport.disconnect();
                         transport.set_stream(stream);
-                        injector.reset_cursor_to_entry(0.5);
                         continue;
                     }
                     Err(e) => {
@@ -208,10 +206,10 @@ async fn handle_event(
         Event::MouseMotion { dx, dy } => {
             let hit_edge = injector.inject_mouse_motion(dx, dy);
             if hit_edge {
-                let fraction = injector.edge_fraction();
-                log::info!("cursor hit return edge (fraction={fraction:.2})");
+                let (from_bottom, source_height) = injector.cursor_from_bottom();
+                log::info!("cursor hit return edge (from_bottom={from_bottom:.0}, height={source_height:.0})");
                 injector.release_all_keys();
-                let _ = transport.send(&Event::ReturnToSender { edge_fraction: fraction }).await;
+                let _ = transport.send(&Event::ReturnToSender { from_bottom, source_height }).await;
             }
         }
         Event::MouseButton { button, state } => {
@@ -226,9 +224,9 @@ async fn handle_event(
         Event::KeyRelease { code } => {
             injector.inject_key(code, false);
         }
-        Event::CaptureBegin { edge_fraction } => {
-            log::info!("capture begin (fraction={edge_fraction:.2})");
-            injector.reset_cursor_to_entry(edge_fraction);
+        Event::CaptureBegin { from_bottom, source_height } => {
+            log::info!("capture begin (from_bottom={from_bottom:.0}, source_height={source_height:.0})");
+            injector.place_cursor_from_bottom(from_bottom);
         }
         Event::CaptureEnd => {
             log::info!("capture end");

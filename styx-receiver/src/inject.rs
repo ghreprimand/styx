@@ -228,10 +228,10 @@ impl Injector {
         }
     }
 
-    pub fn reset_cursor_to_entry(&mut self, edge_fraction: f64) {
-        // Map the fraction to the edge span (the monitor at the return edge),
-        // not the full multi-monitor bounding box.
-        let pos = self.edge_span.min + edge_fraction * (self.edge_span.max - self.edge_span.min);
+    /// Place the cursor at the entry edge, at the given pixel distance from
+    /// the bottom of the edge monitor. Clamps to the edge span.
+    pub fn place_cursor_from_bottom(&mut self, from_bottom: f64) {
+        let pos = (self.edge_span.max - from_bottom).clamp(self.edge_span.min, self.edge_span.max);
         let x = match self.return_edge {
             Edge::Right => self.display_bounds.max_x - 2.0,
             Edge::Left => self.display_bounds.min_x + 2.0,
@@ -245,15 +245,16 @@ impl Injector {
         self.cursor_pos = CGPoint::new(x, y);
     }
 
-    /// Returns the normalized position (0.0–1.0) along the return edge,
-    /// relative to the monitor that owns that edge.
-    pub fn edge_fraction(&self) -> f64 {
+    /// Returns the cursor's pixel distance from the bottom of the edge monitor
+    /// and the edge monitor's total height.
+    pub fn cursor_from_bottom(&self) -> (f64, f64) {
         let pos = match self.return_edge {
             Edge::Left | Edge::Right => self.cursor_pos.y,
             Edge::Top | Edge::Bottom => self.cursor_pos.x,
         };
-        let span = self.edge_span.max - self.edge_span.min;
-        if span > 0.0 { ((pos - self.edge_span.min) / span).clamp(0.0, 1.0) } else { 0.5 }
+        let from_bottom = (self.edge_span.max - pos).clamp(0.0, self.edge_span.max - self.edge_span.min);
+        let height = self.edge_span.max - self.edge_span.min;
+        (from_bottom, height)
     }
 }
 
