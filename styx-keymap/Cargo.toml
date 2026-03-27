@@ -1,0 +1,10 @@
+[package]
+name = "styx-keymap"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "evdev to macOS keycode mapping for styx"
+
+[dependencies]
+keycode = "0.4"

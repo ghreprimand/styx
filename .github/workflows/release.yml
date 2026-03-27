@@ -1,0 +1,54 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev wayland-protocols libevdev-dev
+      - run: cargo build --release -p styx-sender
+      - uses: actions/upload-artifact@v4
+        with:
+          name: styx-sender-linux-x86_64
+          path: target/release/styx-sender
+
+  build-macos-arm:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p styx-receiver
+      - uses: actions/upload-artifact@v4
+        with:
+          name: styx-receiver-macos-arm64
+          path: target/release/styx-receiver
+
+  build-macos-x86:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p styx-receiver
+      - uses: actions/upload-artifact@v4
+        with:
+          name: styx-receiver-macos-x86_64
+          path: target/release/styx-receiver
+
+  release:
+    needs: [build-linux, build-macos-arm, build-macos-x86]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            styx-sender-linux-x86_64/styx-sender
+            styx-receiver-macos-arm64/styx-receiver
+            styx-receiver-macos-x86_64/styx-receiver
