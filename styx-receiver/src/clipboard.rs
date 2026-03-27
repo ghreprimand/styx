@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tokio::time;
 
 const TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_TEXT_LEN: usize = 65531; // 65535 frame - 4 byte text length header
+const MAX_TEXT_LEN: usize = 65530; // 65535 frame - 1 type byte - 4 byte text length header
 
 pub fn hash_text(text: &str) -> u64 {
     let mut h = DefaultHasher::new();
