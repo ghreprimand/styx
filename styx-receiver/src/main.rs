@@ -1,3 +1,4 @@
+mod clipboard;
 mod edge;
 mod inject;
 mod transport;
@@ -118,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    let mut last_clip_hash: u64 = 0;
 
     log::info!("styx-receiver running (return_edge={:?})", return_edge);
 
@@ -184,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             };
-            handle_event(&mut injector, &mut transport, event).await;
+            handle_event(&mut injector, &mut transport, &mut last_clip_hash, event).await;
         }
 
         injector.release_all_keys();
@@ -200,6 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn handle_event(
     injector: &mut Injector,
     transport: &mut ReceiverTransport,
+    last_clip_hash: &mut u64,
     event: Event,
 ) {
     match event {
@@ -209,6 +212,16 @@ async fn handle_event(
                 let (from_bottom, source_height) = injector.cursor_from_bottom();
                 log::info!("cursor hit return edge (from_bottom={from_bottom:.0}, height={source_height:.0})");
                 injector.release_all_keys();
+
+                if let Some(text) = clipboard::read_clipboard().await {
+                    let h = clipboard::hash_text(&text);
+                    if h != *last_clip_hash {
+                        *last_clip_hash = h;
+                        let _ = transport.send(&Event::ClipboardData { text }).await;
+                        log::debug!("sent clipboard to sender");
+                    }
+                }
+
                 let _ = transport.send(&Event::ReturnToSender { from_bottom, source_height }).await;
             }
         }
@@ -234,6 +247,10 @@ async fn handle_event(
         }
         Event::Heartbeat => {
             let _ = transport.send(&Event::HeartbeatAck).await;
+        }
+        Event::ClipboardData { text } => {
+            log::debug!("received clipboard from sender");
+            clipboard::write_clipboard(&text).await;
         }
         Event::ReturnToSender { .. } | Event::HeartbeatAck => {}
     }

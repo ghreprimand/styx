@@ -9,7 +9,7 @@ description = "Styx receiver -- injects input on macOS from a Linux sender"
 [dependencies]
 styx-proto = { path = "../styx-proto" }
 styx-keymap = { path = "../styx-keymap" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time", "process"] }
 core-graphics = { version = "0.24", features = ["highsierra"] }
 core-foundation = "0.10"
 bitflags = "2"

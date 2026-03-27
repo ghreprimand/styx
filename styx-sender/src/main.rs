@@ -1,4 +1,5 @@
 mod capture;
+mod clipboard;
 mod evdev;
 mod hyprland;
 mod transport;
@@ -154,7 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut capturing = false;
     let mut return_cooldown: Option<time::Instant> = None;
+    let mut last_clip_hash: u64 = 0;
 
+    clipboard::check_tools();
     log::info!("styx-sender running (monitor={}, edge={:?})", config.sender.monitor, edge);
 
     // Outer loop: connect, run event loop, reconnect on failure.
@@ -210,6 +213,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let _ = transport.send(&Event::CaptureBegin { from_bottom, source_height }).await;
                             log::info!("capture active");
+
+                            if let Some(text) = clipboard::read_clipboard().await {
+                                let h = clipboard::hash_text(&text);
+                                if h != last_clip_hash {
+                                    last_clip_hash = h;
+                                    let _ = transport.send(&Event::ClipboardData { text }).await;
+                                    log::debug!("sent clipboard to receiver");
+                                }
+                            }
                         }
                         CaptureEvent::Input(event) => {
                             if capturing {
@@ -258,6 +270,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Ok(Event::HeartbeatAck) => {
                             missed_heartbeats = 0;
+                        }
+                        Ok(Event::ClipboardData { text }) => {
+                            log::debug!("received clipboard from receiver");
+                            clipboard::write_clipboard(&text).await;
                         }
                         Ok(_) => {}
                         Err(e) => {
