@@ -20,13 +20,13 @@ pub enum Event {
     MouseScroll { axis: u8, value: f64 },
     KeyPress { code: u32 },
     KeyRelease { code: u32 },
-    /// Sender → receiver: capture started. `edge_fraction` is the normalized
-    /// position along the crossing edge (0.0 = top/left, 1.0 = bottom/right).
-    CaptureBegin { edge_fraction: f64 },
+    /// Cursor crossed the edge. Carries the pixel distance from the bottom
+    /// of the source monitor and the source monitor's total height so the
+    /// receiving side can map proportionally.
+    CaptureBegin { from_bottom: f64, source_height: f64 },
     CaptureEnd,
-    /// Cursor hit the return edge. `edge_fraction` is the normalized position
-    /// along the return edge where the cursor exited.
-    ReturnToSender { edge_fraction: f64 },
+    /// Cursor hit the return edge. Same fields as CaptureBegin.
+    ReturnToSender { from_bottom: f64, source_height: f64 },
     Heartbeat,
     HeartbeatAck,
 }
@@ -53,7 +53,7 @@ impl Event {
             Event::MouseButton { .. } => 5,
             Event::MouseScroll { .. } => 9,
             Event::KeyPress { .. } | Event::KeyRelease { .. } => 4,
-            Event::CaptureBegin { .. } | Event::ReturnToSender { .. } => 8,
+            Event::CaptureBegin { .. } | Event::ReturnToSender { .. } => 16,
             _ => 0,
         }
     }
@@ -75,8 +75,10 @@ impl Event {
             Event::KeyPress { code } | Event::KeyRelease { code } => {
                 buf[0..4].copy_from_slice(&code.to_be_bytes());
             }
-            Event::CaptureBegin { edge_fraction } | Event::ReturnToSender { edge_fraction } => {
-                buf[0..8].copy_from_slice(&edge_fraction.to_be_bytes());
+            Event::CaptureBegin { from_bottom, source_height }
+            | Event::ReturnToSender { from_bottom, source_height } => {
+                buf[0..8].copy_from_slice(&from_bottom.to_be_bytes());
+                buf[8..16].copy_from_slice(&source_height.to_be_bytes());
             }
             _ => {}
         }
@@ -123,19 +125,21 @@ impl Event {
                 Ok(Event::KeyRelease { code })
             }
             EVENT_CAPTURE_BEGIN => {
-                if buf.len() < 8 {
+                if buf.len() < 16 {
                     return Err(DecodeError::TruncatedPayload);
                 }
-                let edge_fraction = f64::from_be_bytes(buf[0..8].try_into().unwrap());
-                Ok(Event::CaptureBegin { edge_fraction })
+                let from_bottom = f64::from_be_bytes(buf[0..8].try_into().unwrap());
+                let source_height = f64::from_be_bytes(buf[8..16].try_into().unwrap());
+                Ok(Event::CaptureBegin { from_bottom, source_height })
             }
             EVENT_CAPTURE_END => Ok(Event::CaptureEnd),
             EVENT_RETURN_TO_SENDER => {
-                if buf.len() < 8 {
+                if buf.len() < 16 {
                     return Err(DecodeError::TruncatedPayload);
                 }
-                let edge_fraction = f64::from_be_bytes(buf[0..8].try_into().unwrap());
-                Ok(Event::ReturnToSender { edge_fraction })
+                let from_bottom = f64::from_be_bytes(buf[0..8].try_into().unwrap());
+                let source_height = f64::from_be_bytes(buf[8..16].try_into().unwrap());
+                Ok(Event::ReturnToSender { from_bottom, source_height })
             }
             EVENT_HEARTBEAT => Ok(Event::Heartbeat),
             EVENT_HEARTBEAT_ACK => Ok(Event::HeartbeatAck),
@@ -232,9 +236,9 @@ mod tests {
             Event::MouseScroll { axis: 1, value: 15.5 },
             Event::KeyPress { code: 42 },
             Event::KeyRelease { code: 42 },
-            Event::CaptureBegin { edge_fraction: 0.25 },
+            Event::CaptureBegin { from_bottom: 200.0, source_height: 1920.0 },
             Event::CaptureEnd,
-            Event::ReturnToSender { edge_fraction: 0.75 },
+            Event::ReturnToSender { from_bottom: 400.0, source_height: 956.0 },
             Event::Heartbeat,
             Event::HeartbeatAck,
         ]
