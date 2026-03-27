@@ -159,6 +159,9 @@ impl Injector {
             self.cursor_pos,
             cg_button,
         ) {
+            // Set click count on both down and up so UI elements that check
+            // the full click sequence recognize it.
+            event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
             event.post(CGEventTapLocation::HID);
         }
     }
