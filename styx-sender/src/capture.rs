@@ -127,6 +127,7 @@ struct State {
     scroll_discrete_pending: bool,
     edge: Edge,
     monitor_size: (i32, i32),
+    max_from_bottom: Option<f64>,
 }
 
 struct Inner {
@@ -195,6 +196,7 @@ impl Capture {
             scroll_discrete_pending: false,
             edge,
             monitor_size: (0, 0),
+            max_from_bottom: None,
         };
 
         // Read wl_output globals.
@@ -279,6 +281,12 @@ impl Capture {
 
         let inner = AsyncFd::new(Inner { queue, state })?;
         Ok(Capture { inner })
+    }
+
+    /// Set the maximum from_bottom that should trigger capture.
+    /// Crossover above this height (from the bottom) is blocked.
+    pub fn set_max_from_bottom(&mut self, max: f64) {
+        self.inner.get_mut().state.max_from_bottom = Some(max);
     }
 
     pub fn release(&mut self) {
@@ -502,6 +510,12 @@ impl Dispatch<WlPointer, ()> for State {
                                 (w - surface_x, w)
                             }
                         };
+                        // Block crossover above the receiver's screen height.
+                        if let Some(max) = state.max_from_bottom {
+                            if from_bottom > max {
+                                return;
+                            }
+                        }
                         state.grab(&surface, pointer, serial);
                         state.pending_events.push_back(CaptureEvent::Begin { from_bottom, source_height });
                     }
