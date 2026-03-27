@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 use clap::Parser;
 use serde::Deserialize;
+use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 use styx_proto::Event;
@@ -88,7 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .parse()?;
 
-    let mut transport = ReceiverTransport::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await?;
+    log::info!("listening on {addr}");
+
+    let mut transport = ReceiverTransport::from_listener(listener);
     let mut injector = Injector::new(return_edge)?;
 
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -103,12 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         tokio::select! {
-            // Check for new connections. If a new sender connects, drop the
-            // old connection and switch to the new one.
-            result = transport.listener().accept() => {
+            // Listen for new connections concurrently with processing events.
+            result = listener_accept(&transport) => {
                 match result {
                     Ok((stream, peer)) => {
-                        let _ = stream.set_nodelay(true);
                         log::info!("new connection from {peer}, replacing previous");
                         injector.release_all_keys();
                         transport.disconnect();
@@ -152,6 +154,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+
+/// Accept on the listener without borrowing ReceiverTransport mutably.
+async fn listener_accept(
+    transport: &ReceiverTransport,
+) -> io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    transport.listener.accept().await
+}
+
+use std::io;
 
 async fn handle_event(
     injector: &mut Injector,
