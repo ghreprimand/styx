@@ -2,14 +2,17 @@ use std::collections::HashSet;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
-use evdev::{Device, EventSummary, KeyCode};
+use evdev::{AttributeSet, Device, EventSummary, EventType, InputEvent, KeyCode};
+use evdev::uinput::VirtualDevice;
 use tokio::io::unix::AsyncFd;
 
 use styx_proto::Event;
 
 pub struct EvdevCapture {
     device: Device,
+    synth: VirtualDevice,
     held_keys: HashSet<u32>,
+    keys_at_grab: HashSet<u32>,
     grabbed: bool,
 }
 
@@ -21,18 +24,35 @@ impl EvdevCapture {
             device.name().unwrap_or("unknown"),
             path.display()
         );
+
+        let mut keys = AttributeSet::<KeyCode>::new();
+        if let Some(supported) = device.supported_keys() {
+            for key in supported.iter() {
+                keys.insert(key);
+            }
+        }
+        let synth = VirtualDevice::builder()?
+            .name("styx-synth")
+            .with_keys(&keys)?
+            .build()?;
+
         Ok(EvdevCapture {
             device,
+            synth,
             held_keys: HashSet::new(),
+            keys_at_grab: HashSet::new(),
             grabbed: false,
         })
     }
 
     pub fn grab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.grabbed {
+            if let Ok(state) = self.device.get_key_state() {
+                self.keys_at_grab = state.iter().map(|k| k.code() as u32).collect();
+            }
             self.device.grab()?;
             self.grabbed = true;
-            log::debug!("evdev grab acquired");
+            log::debug!("evdev grab acquired ({} keys held)", self.keys_at_grab.len());
         }
         Ok(())
     }
@@ -41,6 +61,23 @@ impl EvdevCapture {
         if self.grabbed {
             self.device.ungrab()?;
             self.grabbed = false;
+
+            // Keys the compositor saw go down before the grab but that were
+            // released while grabbed need synthetic releases injected via
+            // uinput, otherwise the compositor considers them stuck.
+            let current = self.device.get_key_state().unwrap_or_default();
+            let mut released = 0u32;
+            for &code in &self.keys_at_grab {
+                if !current.contains(KeyCode(code as u16)) {
+                    let ev = InputEvent::new(EventType::KEY.0, code as u16, 0);
+                    let _ = self.synth.emit(&[ev]);
+                    released += 1;
+                }
+            }
+            self.keys_at_grab.clear();
+            if released > 0 {
+                log::debug!("injected {released} synthetic key releases");
+            }
             log::debug!("evdev grab released");
         }
         Ok(())
