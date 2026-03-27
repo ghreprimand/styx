@@ -4,6 +4,7 @@ After=graphical-session.target
 BindsTo=graphical-session.target
 
 [Service]
+Environment=RUST_LOG=info
 ExecStart=/usr/bin/styx-sender
 Restart=on-failure
 RestartSec=3
