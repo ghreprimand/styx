@@ -39,9 +39,17 @@ struct SenderConfig {
     edge: String,
     #[serde(default)]
     keyboard_device: Option<String>,
+    /// The fraction of the sender's monitor height (from the bottom) that maps
+    /// to the receiver's full screen. For example, 0.5 means the bottom half
+    /// of the sender's monitor maps to the receiver's full height. Default 1.0
+    /// (full height, no remapping).
+    #[serde(default = "default_entry_zone")]
+    entry_zone: f64,
     #[serde(default)]
     heartbeat: HeartbeatConfig,
 }
+
+fn default_entry_zone() -> f64 { 1.0 }
 
 #[derive(Deserialize)]
 struct HeartbeatConfig {
@@ -190,6 +198,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     continue;
                                 }
                             }
+                            // Block crossover above the entry zone.
+                            let zone = config.sender.entry_zone.clamp(0.01, 1.0);
+                            let zone_start = 1.0 - zone;
+                            if edge_fraction < zone_start {
+                                wayland_capture.release();
+                                continue;
+                            }
                             return_cooldown = None;
                             capturing = true;
                             missed_heartbeats = 0;
@@ -208,7 +223,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for code in evdev_capture.held_modifiers() {
                                 let _ = transport.send(&Event::KeyPress { code }).await;
                             }
-                            let _ = transport.send(&Event::CaptureBegin { edge_fraction }).await;
+                            // Remap from entry_zone of sender monitor to full receiver screen.
+                            // e.g. entry_zone=0.5: sender fraction 0.5..1.0 → receiver 0.0..1.0
+                            let zone = config.sender.entry_zone.clamp(0.01, 1.0);
+                            let zone_start = 1.0 - zone;
+                            let remapped = ((edge_fraction - zone_start) / zone).clamp(0.0, 1.0);
+                            let _ = transport.send(&Event::CaptureBegin { edge_fraction: remapped }).await;
                             log::info!("capture active");
                         }
                         CaptureEvent::Input(event) => {
@@ -241,8 +261,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
 
                             if let Ok(geom) = hyprland::get_monitor(&config.sender.monitor).await {
+                                // Remap from full receiver screen back to entry_zone.
+                                let zone = config.sender.entry_zone.clamp(0.01, 1.0);
+                                let zone_start = 1.0 - zone;
+                                let mapped = zone_start + edge_fraction * zone;
                                 let x = geom.x + 100;
-                                let y = geom.y + (edge_fraction * geom.height as f64) as i32;
+                                let y = geom.y + (mapped * geom.height as f64) as i32;
                                 let _ = hyprland::warp_cursor(x, y).await;
                             }
 
