@@ -21,7 +21,7 @@ use evdev::{AsyncEvdev, EvdevCapture};
 use transport::SenderTransport;
 
 #[derive(Parser)]
-#[command(name = "styx-sender", about = "Styx software KVM sender")]
+#[command(name = "styx-sender", about = "Styx software KVM sender", version)]
 struct Cli {
     #[arg(short, long, default_value = "~/.config/styx/config.toml")]
     config: String,
