@@ -3,11 +3,13 @@ mod inject;
 mod transport;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use clap::Parser;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::time;
 
 use styx_proto::Event;
 
@@ -76,11 +78,8 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-enum SelectResult {
-    NewConnection(tokio::net::TcpStream, std::net::SocketAddr),
-    Event(Result<Event, styx_proto::DecodeError>),
-    Signal,
-}
+/// No data for this long means the connection is dead.
+const RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -105,76 +104,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     log::info!("styx-receiver running (return_edge={:?})", return_edge);
-    log::info!("waiting for connection...");
 
     loop {
-        // Determine what to wait on based on connection state.
-        let result = if transport.is_connected() {
-            tokio::select! {
-                r = listener.accept() => {
-                    match r {
-                        Ok((stream, peer)) => SelectResult::NewConnection(stream, peer),
-                        Err(e) => {
-                            log::error!("accept error: {e}");
-                            continue;
-                        }
-                    }
+        // Wait for a connection.
+        log::info!("waiting for connection...");
+        let (stream, peer) = tokio::select! {
+            r = listener.accept() => match r {
+                Ok(conn) => conn,
+                Err(e) => {
+                    log::error!("accept error: {e}");
+                    continue;
                 }
-                r = transport.recv() => SelectResult::Event(r),
-                _ = sigterm.recv() => SelectResult::Signal,
-                _ = sigint.recv() => SelectResult::Signal,
-            }
-        } else {
-            tokio::select! {
-                r = listener.accept() => {
-                    match r {
-                        Ok((stream, peer)) => SelectResult::NewConnection(stream, peer),
-                        Err(e) => {
-                            log::error!("accept error: {e}");
-                            continue;
-                        }
-                    }
-                }
-                _ = sigterm.recv() => SelectResult::Signal,
-                _ = sigint.recv() => SelectResult::Signal,
-            }
+            },
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
         };
+        log::info!("accepted connection from {peer}");
+        transport.set_stream(stream);
+        injector.reset_cursor_to_entry();
 
-        // Handle the result outside the select, with full mutable access.
-        match result {
-            SelectResult::NewConnection(stream, peer) => {
-                if transport.is_connected() {
-                    log::info!("new connection from {peer}, replacing previous");
+        // Process events on this connection until it dies.
+        loop {
+            let event = tokio::select! {
+                r = time::timeout(RECV_TIMEOUT, transport.recv()) => match r {
+                    Ok(Ok(event)) => event,
+                    Ok(Err(styx_proto::DecodeError::ConnectionClosed)) => {
+                        log::info!("sender disconnected");
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("recv error: {e}");
+                        break;
+                    }
+                    Err(_) => {
+                        log::warn!("recv timeout, connection dead");
+                        break;
+                    }
+                },
+                _ = sigterm.recv() => {
                     injector.release_all_keys();
                     transport.disconnect();
-                } else {
-                    log::info!("accepted connection from {peer}");
+                    log::info!("signal received, shutting down");
+                    return Ok(());
                 }
-                transport.set_stream(stream);
-                injector.reset_cursor_to_entry();
-            }
-            SelectResult::Event(Ok(event)) => {
-                handle_event(&mut injector, &mut transport, event).await;
-            }
-            SelectResult::Event(Err(styx_proto::DecodeError::ConnectionClosed)) => {
-                log::info!("sender disconnected");
-                injector.release_all_keys();
-                transport.disconnect();
-                log::info!("waiting for connection...");
-            }
-            SelectResult::Event(Err(e)) => {
-                log::error!("recv error: {e}");
-                injector.release_all_keys();
-                transport.disconnect();
-                log::info!("waiting for connection...");
-            }
-            SelectResult::Signal => {
-                log::info!("signal received, shutting down");
-                injector.release_all_keys();
-                return Ok(());
-            }
+                _ = sigint.recv() => {
+                    injector.release_all_keys();
+                    transport.disconnect();
+                    log::info!("signal received, shutting down");
+                    return Ok(());
+                }
+            };
+            handle_event(&mut injector, &mut transport, event).await;
         }
+
+        injector.release_all_keys();
+        transport.disconnect();
     }
+
+    injector.release_all_keys();
+    transport.disconnect();
+    log::info!("shutdown complete");
+    Ok(())
 }
 
 async fn handle_event(
