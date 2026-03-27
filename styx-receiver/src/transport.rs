@@ -1,23 +1,20 @@
 use std::io;
-use std::net::SocketAddr;
 
 use tokio::net::{TcpListener, TcpStream};
 
 use styx_proto::{self, Event, read_event, write_event};
 
 pub struct ReceiverTransport {
-    listener: TcpListener,
+    pub listener: TcpListener,
     stream: Option<TcpStream>,
 }
 
 impl ReceiverTransport {
-    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
-        log::info!("listening on {addr}");
-        Ok(ReceiverTransport {
+    pub fn from_listener(listener: TcpListener) -> Self {
+        ReceiverTransport {
             listener,
             stream: None,
-        })
+        }
     }
 
     pub async fn accept(&mut self) -> io::Result<()> {
@@ -30,21 +27,6 @@ impl ReceiverTransport {
         }
         self.stream = Some(stream);
         Ok(())
-    }
-
-    /// Accept a new connection if one is pending, without blocking.
-    /// Returns true if a new connection replaced the old one.
-    pub async fn try_accept(&mut self) -> io::Result<bool> {
-        match self.listener.try_accept() {
-            Ok((stream, peer)) => {
-                stream.set_nodelay(true)?;
-                log::info!("new connection from {peer}, replacing old");
-                self.stream = Some(stream);
-                Ok(true)
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e),
-        }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -72,10 +54,7 @@ impl ReceiverTransport {
     }
 
     pub fn replace_stream(&mut self, stream: TcpStream) {
+        let _ = stream.set_nodelay(true);
         self.stream = Some(stream);
-    }
-
-    pub fn listener(&self) -> &TcpListener {
-        &self.listener
     }
 }
