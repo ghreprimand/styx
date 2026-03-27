@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     let mut capturing = false;
-    let mut return_cooldown: Option<time::Instant> = None;
+    let mut return_cooldown: Option<time::Instant>;
     let mut last_clip_hash: u64 = 0;
 
     clipboard::check_tools();
@@ -166,6 +166,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Brief settle time so the receiver's event loop can start
         // processing before we fire recv().
         time::sleep(Duration::from_millis(50)).await;
+
+        // Block capture for a short window after connecting. Queued
+        // Wayland pointer-enter events from the edge surface can fire
+        // immediately and grab the keyboard while the user is typing
+        // locally.
+        return_cooldown = Some(time::Instant::now() + Duration::from_millis(500));
 
         let mut missed_heartbeats: u32 = 0;
         let mut heartbeat_interval = time::interval(Duration::from_millis(
