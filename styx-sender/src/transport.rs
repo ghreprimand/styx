@@ -30,6 +30,12 @@ impl SenderTransport {
             match time::timeout(Duration::from_secs(5), TcpStream::connect(self.addr)).await {
                 Ok(Ok(stream)) => {
                     stream.set_nodelay(true)?;
+                    // Enable TCP keepalive so the OS detects dead connections.
+                    let sock = socket2::SockRef::from(&stream);
+                    let keepalive = socket2::TcpKeepalive::new()
+                        .with_time(Duration::from_secs(5))
+                        .with_interval(Duration::from_secs(5));
+                    let _ = sock.set_tcp_keepalive(&keepalive);
                     log::info!("connected to {}", self.addr);
                     self.stream = Some(stream);
                     return Ok(());

@@ -140,6 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         injector.reset_cursor_to_entry(0.5);
 
         // Process events on this connection until it dies.
+        // Also accept new connections -- if the sender reconnects, drop the
+        // stale socket and switch to the new one immediately.
         loop {
             let event = tokio::select! {
                 r = time::timeout(RECV_TIMEOUT, transport.recv()) => match r {
@@ -155,6 +157,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => {
                         log::warn!("recv timeout, connection dead");
                         break;
+                    }
+                },
+                r = listener.accept() => match r {
+                    Ok((stream, peer)) => {
+                        log::info!("new connection from {peer}, replacing existing");
+                        injector.release_all_keys();
+                        transport.disconnect();
+                        transport.set_stream(stream);
+                        injector.reset_cursor_to_entry(0.5);
+                        continue;
+                    }
+                    Err(e) => {
+                        log::error!("accept error: {e}");
+                        continue;
                     }
                 },
                 _ = sigterm.recv() => {

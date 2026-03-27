@@ -1,4 +1,5 @@
 use std::io;
+use std::time::Duration;
 
 use tokio::net::TcpStream;
 
@@ -33,6 +34,12 @@ impl ReceiverTransport {
 
     pub fn set_stream(&mut self, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
+        // Enable TCP keepalive so the OS detects dead connections.
+        let sock = socket2::SockRef::from(&stream);
+        let keepalive = socket2::TcpKeepalive::new()
+            .with_time(Duration::from_secs(5))
+            .with_interval(Duration::from_secs(5));
+        let _ = sock.set_tcp_keepalive(&keepalive);
         self.stream = Some(stream);
     }
 

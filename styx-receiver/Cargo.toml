@@ -21,3 +21,4 @@ serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 libc = "0.2"
+socket2 = "0.5"
