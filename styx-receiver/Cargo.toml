@@ -1,0 +1,22 @@
+[package]
+name = "styx-receiver"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Styx receiver -- injects input on macOS from a Linux sender"
+
+[dependencies]
+styx-proto = { path = "../styx-proto" }
+styx-keymap = { path = "../styx-keymap" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
+core-graphics = { version = "0.24", features = ["highsierra"] }
+core-foundation = "0.10"
+bitflags = "2"
+keycode = "0.4"
+log = "0.4"
+env_logger = "0.11"
+toml = "1"
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"

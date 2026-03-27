@@ -1,0 +1,25 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  check-sender:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev wayland-protocols libevdev-dev
+      - run: cargo check -p styx-proto -p styx-keymap -p styx-sender
+
+  check-receiver:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check -p styx-proto -p styx-keymap -p styx-receiver
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p styx-proto -p styx-keymap

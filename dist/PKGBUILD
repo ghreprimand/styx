@@ -1,0 +1,34 @@
+pkgname=styx-sender
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Software KVM sender for sharing keyboard/mouse from Hyprland to macOS"
+arch=('x86_64')
+url="https://github.com/ghreprimand/styx"
+license=('MIT')
+depends=('glibc' 'wayland')
+makedepends=('rust' 'pkg-config')
+source=("https://github.com/ghreprimand/styx/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "styx-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "styx-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    export CFLAGS="${CFLAGS//-flto=auto/}"
+    export CXXFLAGS="${CXXFLAGS//-flto=auto/}"
+    cargo build --release --locked -p styx-sender
+}
+
+package() {
+    cd "styx-$pkgver"
+    install -Dm755 target/release/styx-sender "$pkgdir/usr/bin/styx-sender"
+    install -Dm644 dist/styx-sender.service "$pkgdir/usr/lib/systemd/user/styx-sender.service"
+    install -Dm644 dist/config.toml.example "$pkgdir/usr/share/doc/styx/config.toml.example"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
