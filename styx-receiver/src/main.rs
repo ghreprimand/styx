@@ -52,7 +52,6 @@ fn expand_path(path: &str) -> std::path::PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             return std::path::PathBuf::from(home).join(rest);
         }
-        // Fallback: /etc/passwd home directory via libc.
         #[cfg(unix)]
         unsafe {
             let uid = libc::getuid();
@@ -97,44 +96,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("styx-receiver running (return_edge={:?})", return_edge);
 
-    loop {
-        log::info!("waiting for connection...");
-        transport.accept().await?;
-        injector.reset_cursor_to_entry();
+    // Wait for initial connection.
+    log::info!("waiting for connection...");
+    transport.accept().await?;
+    injector.reset_cursor_to_entry();
 
-        loop {
-            tokio::select! {
-                result = transport.recv(), if transport.is_connected() => {
-                    match result {
-                        Ok(event) => {
-                            if handle_event(&mut injector, &mut transport, event).await {
-                                break;
-                            }
-                        }
-                        Err(styx_proto::DecodeError::ConnectionClosed) => {
-                            log::info!("sender disconnected");
-                            injector.release_all_keys();
-                            transport.disconnect();
-                            break;
-                        }
-                        Err(e) => {
-                            log::error!("recv error: {e}");
-                            injector.release_all_keys();
-                            transport.disconnect();
-                            break;
-                        }
+    loop {
+        tokio::select! {
+            // Check for new connections. If a new sender connects, drop the
+            // old connection and switch to the new one.
+            result = transport.listener().accept() => {
+                match result {
+                    Ok((stream, peer)) => {
+                        let _ = stream.set_nodelay(true);
+                        log::info!("new connection from {peer}, replacing previous");
+                        injector.release_all_keys();
+                        transport.disconnect();
+                        transport.replace_stream(stream);
+                        injector.reset_cursor_to_entry();
+                    }
+                    Err(e) => {
+                        log::error!("accept error: {e}");
                     }
                 }
-                _ = sigterm.recv() => {
-                    log::info!("SIGTERM received, shutting down");
-                    injector.release_all_keys();
-                    return Ok(());
+            }
+
+            result = transport.recv(), if transport.is_connected() => {
+                match result {
+                    Ok(event) => {
+                        handle_event(&mut injector, &mut transport, event).await;
+                    }
+                    Err(styx_proto::DecodeError::ConnectionClosed) => {
+                        log::info!("sender disconnected");
+                        injector.release_all_keys();
+                        transport.disconnect();
+                    }
+                    Err(e) => {
+                        log::error!("recv error: {e}");
+                        injector.release_all_keys();
+                        transport.disconnect();
+                    }
                 }
-                _ = sigint.recv() => {
-                    log::info!("SIGINT received, shutting down");
-                    injector.release_all_keys();
-                    return Ok(());
-                }
+            }
+
+            _ = sigterm.recv() => {
+                log::info!("SIGTERM received, shutting down");
+                injector.release_all_keys();
+                return Ok(());
+            }
+            _ = sigint.recv() => {
+                log::info!("SIGINT received, shutting down");
+                injector.release_all_keys();
+                return Ok(());
             }
         }
     }
@@ -144,7 +157,7 @@ async fn handle_event(
     injector: &mut Injector,
     transport: &mut ReceiverTransport,
     event: Event,
-) -> bool {
+) {
     match event {
         Event::MouseMotion { dx, dy } => {
             let hit_edge = injector.inject_mouse_motion(dx, dy);
@@ -179,5 +192,4 @@ async fn handle_event(
         }
         Event::ReturnToSender | Event::HeartbeatAck => {}
     }
-    false
 }

@@ -23,9 +23,28 @@ impl ReceiverTransport {
     pub async fn accept(&mut self) -> io::Result<()> {
         let (stream, peer) = self.listener.accept().await?;
         stream.set_nodelay(true)?;
-        log::info!("accepted connection from {peer}");
+        if self.stream.is_some() {
+            log::info!("dropping old connection, accepted new from {peer}");
+        } else {
+            log::info!("accepted connection from {peer}");
+        }
         self.stream = Some(stream);
         Ok(())
+    }
+
+    /// Accept a new connection if one is pending, without blocking.
+    /// Returns true if a new connection replaced the old one.
+    pub async fn try_accept(&mut self) -> io::Result<bool> {
+        match self.listener.try_accept() {
+            Ok((stream, peer)) => {
+                stream.set_nodelay(true)?;
+                log::info!("new connection from {peer}, replacing old");
+                self.stream = Some(stream);
+                Ok(true)
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -50,5 +69,13 @@ impl ReceiverTransport {
         if self.stream.take().is_some() {
             log::info!("client disconnected");
         }
+    }
+
+    pub fn replace_stream(&mut self, stream: TcpStream) {
+        self.stream = Some(stream);
+    }
+
+    pub fn listener(&self) -> &TcpListener {
+        &self.listener
     }
 }

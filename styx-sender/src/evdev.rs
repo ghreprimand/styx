@@ -90,7 +90,12 @@ impl EvdevCapture {
                         self.held_keys.remove(&code);
                         out.push(Event::KeyRelease { code });
                     }
-                    _ => {} // repeat (2) ignored
+                    2 => {
+                        // Kernel auto-repeat. Forward as another key press
+                        // since macOS doesn't repeat programmatically posted events.
+                        out.push(Event::KeyPress { code });
+                    }
+                    _ => {}
                 }
             }
         }
