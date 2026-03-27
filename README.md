@@ -75,12 +75,13 @@ receiver_host = "192.168.1.100"
 receiver_port = 4242
 monitor = "DP-1"
 edge = "left"
-keyboard_device = "/dev/input/by-id/usb-Example_Keyboard-event-kbd"
 ```
 
 - `monitor`: the Hyprland output name (from `hyprctl monitors`) where the edge surface is created.
 - `edge`: which side of the monitor triggers capture (`left`, `right`, `top`, `bottom`).
-- `keyboard_device`: the evdev device path for the keyboard. List candidates with `ls /dev/input/by-id/ | grep kbd`.
+- `keyboard_device` (optional): the evdev device path for the keyboard. If omitted, styx auto-detects the first keyboard in `/dev/input/by-id/`. List candidates with `ls /dev/input/by-id/ | grep kbd`.
+
+The user running the sender must have permission to read evdev devices. On most systems this means being in the `input` group: `sudo usermod -aG input $USER` (requires re-login).
 
 **Receiver (macOS):**
 
@@ -88,7 +89,10 @@ keyboard_device = "/dev/input/by-id/usb-Example_Keyboard-event-kbd"
 [receiver]
 listen_host = "0.0.0.0"
 listen_port = 4242
+return_edge = "right"
 ```
+
+- `return_edge`: which edge of the Mac's display faces the Linux machine. When the cursor hits this edge, control returns to the sender. Options: `left`, `right`, `top`, `bottom`. Default: `right`.
 
 ## Installation
 
@@ -142,6 +146,10 @@ styx-sender/     Linux binary: layer-shell capture, evdev grab, Hyprland IPC
 styx-receiver/   macOS binary: CGEvent injection, edge detection, TCP server
 dist/            PKGBUILD, systemd service, launchd plist, Homebrew formula
 ```
+
+## Acknowledgments
+
+Styx's layer-shell edge detection approach is inspired by [lan-mouse](https://github.com/feschber/lan-mouse), which demonstrated that wlr-layer-shell surfaces can be used for input capture on compositors that lack the InputCapture portal. The lan-mouse project's approach to this problem made styx possible.
 
 ## License
 
