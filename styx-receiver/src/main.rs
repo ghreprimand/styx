@@ -100,29 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("styx-receiver running (return_edge={:?})", return_edge);
 
-    // Wait for initial connection.
-    log::info!("waiting for connection...");
-    let (stream, peer) = listener.accept().await?;
-    log::info!("accepted connection from {peer}");
-    transport.set_stream(stream);
-    injector.reset_cursor_to_entry();
-
     loop {
-        tokio::select! {
-            result = listener.accept(), if !transport.is_connected() => {
-                match result {
-                    Ok((stream, peer)) => {
-                        log::info!("accepted connection from {peer}");
-                        transport.set_stream(stream);
-                        injector.reset_cursor_to_entry();
-                    }
-                    Err(e) => {
-                        log::error!("accept error: {e}");
-                    }
+        // Outer loop: wait for a connection.
+        if !transport.is_connected() {
+            log::info!("waiting for connection...");
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, peer) = result?;
+                    log::info!("accepted connection from {peer}");
+                    transport.set_stream(stream);
+                    injector.reset_cursor_to_entry();
+                }
+                _ = sigterm.recv() => {
+                    log::info!("SIGTERM received, shutting down");
+                    return Ok(());
+                }
+                _ = sigint.recv() => {
+                    log::info!("SIGINT received, shutting down");
+                    return Ok(());
                 }
             }
+            continue;
+        }
 
-            result = transport.recv(), if transport.is_connected() => {
+        // Inner: process events on the live connection.
+        tokio::select! {
+            result = transport.recv() => {
                 match result {
                     Ok(event) => {
                         handle_event(&mut injector, &mut transport, event).await;
@@ -139,7 +142,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-
             _ = sigterm.recv() => {
                 log::info!("SIGTERM received, shutting down");
                 injector.release_all_keys();
