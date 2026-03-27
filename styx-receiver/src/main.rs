@@ -18,7 +18,7 @@ use inject::{Edge, Injector};
 use transport::ReceiverTransport;
 
 #[derive(Parser)]
-#[command(name = "styx-receiver", about = "Styx software KVM receiver")]
+#[command(name = "styx-receiver", about = "Styx software KVM receiver", version)]
 struct Cli {
     #[arg(short, long, default_value = "~/.config/styx/config.toml")]
     config: String,
