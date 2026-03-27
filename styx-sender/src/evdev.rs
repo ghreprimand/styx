@@ -93,7 +93,12 @@ impl EvdevCapture {
                     2 => {
                         // Kernel auto-repeat. Forward as another key press
                         // since macOS doesn't repeat programmatically posted events.
-                        out.push(Event::KeyPress { code });
+                        // Suppress repeats for modifier keys -- they cause
+                        // duplicate modifier-down events on macOS which triggers
+                        // unintended shortcuts and special characters.
+                        if !styx_keymap::is_modifier(code) {
+                            out.push(Event::KeyPress { code });
+                        }
                     }
                     _ => {}
                 }
