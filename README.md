@@ -43,6 +43,19 @@ Linux (sender)                            Mac (receiver)
 +-----------------+                      +-----------------+
 ```
 
+### Cursor Position Mapping
+
+When the cursor crosses between machines, styx maps the vertical position proportionally based on pixel distance from the bottom of each monitor. Both monitors are treated as bottom-aligned:
+
+- Cursor at the **bottom** of either monitor crosses to the **bottom** of the other.
+- Cursor at the **top** of a shorter monitor crosses to the proportional height on the taller one.
+
+For example, if the Mac display is 956 logical points tall and the Linux monitor is 1920 pixels tall (portrait), the Mac's full height maps to the bottom half of the Linux monitor. Crossing at the top of the Mac places the cursor roughly halfway up the Linux monitor.
+
+After the first successful round-trip, the sender learns the receiver's screen height and blocks crossover above that height on the Linux monitor. This prevents the cursor from crossing into a region that has no corresponding position on the Mac.
+
+Portrait (rotated) monitors are handled automatically -- styx accounts for Hyprland's monitor transform when computing cursor positions.
+
 ## Requirements
 
 **Sender (Linux):**
@@ -53,8 +66,9 @@ Linux (sender)                            Mac (receiver)
 - User must be in the `input` group for evdev access (`sudo usermod -aG input $USER`, requires re-login)
 
 **Receiver (macOS):**
-- macOS with Accessibility permission granted to the receiver binary (System Settings > Privacy & Security > Accessibility)
+- macOS Ventura (13.0) or later
 - Rust toolchain
+- Accessibility permission granted to the receiver app bundle
 
 ## Building
 
@@ -116,20 +130,47 @@ Move the cursor to the configured edge of the Linux monitor to begin controlling
 
 ## Installation
 
-**Arch Linux / pacman:** A PKGBUILD and systemd user service are provided in `dist/`.
+### Linux (Arch Linux)
+
+A PKGBUILD and systemd user service are provided in `dist/`.
 
 ```
 systemctl --user enable --now styx-sender
 ```
 
-**macOS:** Build from source or use the Homebrew formula in `dist/homebrew/`. A launchd plist is provided:
+### macOS
+
+The recommended installation method is the install script, which builds the receiver, creates a signed `.app` bundle, and configures launchd for autostart:
 
 ```
-cp dist/styx-receiver.plist ~/Library/LaunchAgents/com.ghreprimand.styx-receiver.plist
-launchctl load ~/Library/LaunchAgents/com.ghreprimand.styx-receiver.plist
+./dist/macos/install.sh
 ```
 
-**From source:**
+The script will:
+1. Build `styx-receiver` in release mode.
+2. Create `/Applications/Styx Receiver.app` with the binary and metadata.
+3. Sign the app with a `styx-cert` code signing certificate (falls back to ad-hoc if not found).
+4. Install a launchd agent that starts the receiver on login and restarts on failure.
+
+After installation, grant Accessibility permission:
+1. Open **System Settings > Privacy & Security > Accessibility**.
+2. Click the `+` button and add `/Applications/Styx Receiver.app`.
+3. Enable the toggle.
+
+The receiver will start automatically on login. Logs are at `/tmp/styx-receiver.stderr.log`.
+
+#### Code Signing Certificate
+
+For Accessibility permission to persist across rebuilds, create a self-signed code signing certificate:
+
+1. Open **Keychain Access**.
+2. Go to **Keychain Access > Certificate Assistant > Create a Certificate**.
+3. Name: `styx-cert`, Identity Type: **Self Signed Root**, Certificate Type: **Code Signing**.
+4. Create the certificate.
+
+Without `styx-cert`, the install script falls back to ad-hoc signing. Ad-hoc signatures change on every build, so you may need to re-grant Accessibility permission after each rebuild.
+
+### From Source
 
 ```
 cargo install --git https://github.com/ghreprimand/styx styx-sender   # Linux
@@ -137,6 +178,27 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 ```
 
 **Pre-built binaries** for Linux (x86_64) and macOS (ARM64, x86_64) are published on the [Releases](https://github.com/ghreprimand/styx/releases) page.
+
+## Troubleshooting
+
+**Cursor doesn't appear on Mac after crossing:**
+- Check that Accessibility permission is granted to `Styx Receiver.app` (not to a terminal or bare binary).
+- Check logs: `tail -f /tmp/styx-receiver.stderr.log`. The line `accessibility: granted` should appear at startup. If it says `NOT GRANTED`, re-add the app in System Settings.
+- If you rebuilt the receiver, you may need to remove and re-add the Accessibility entry (especially with ad-hoc signing).
+
+**Receiver doesn't start on login:**
+- Verify the launchd agent is loaded: `launchctl print gui/$(id -u)/com.ghreprimand.styx-receiver`
+- Re-run `./dist/macos/install.sh` to reinstall.
+
+**Connection drops repeatedly:**
+- Both sides must be on the same protocol version. Rebuild and restart both sender and receiver after pulling updates.
+- Check for duplicate sender instances: `pgrep -c styx-sender` should return 1.
+
+**Cursor position is wrong on portrait monitors:**
+- Styx accounts for Hyprland monitor transforms (90/270 rotation). If positions are still wrong, check that `hyprctl -j monitors` shows the correct `transform` value for your portrait monitor.
+
+**Keys trigger wrong shortcuts on Mac:**
+- Linux Left Alt maps to macOS Option, and Linux Super maps to macOS Command. This matches the physical key positions but differs from Linux shortcut conventions. Muscle memory adjustment is expected.
 
 ## Design Decisions
 
@@ -146,6 +208,7 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 - **Unidirectional.** The Linux machine is always the sender, the Mac is always the receiver. One connection, one direction, minimal state.
 - **Adaptive heartbeat.** 1-second interval during active capture, 5-second interval when idle. Three missed heartbeats trigger disconnect and key release. Worst-case detection during active use is 3 seconds.
 - **Release all keys on disconnect.** Both sides track held keys and release everything immediately when the connection drops.
+- **Bottom-aligned cursor mapping.** Monitors of different heights are treated as bottom-aligned. The wire protocol sends the pixel distance from the bottom and the source monitor's height, so each side can map proportionally without needing to know the other's resolution in advance.
 
 ## Scope and Limitations
 
@@ -163,7 +226,7 @@ styx-proto/      Wire protocol: event types, binary encoding, TCP framing
 styx-keymap/     evdev to macOS keycode translation
 styx-sender/     Linux binary: layer-shell capture, evdev grab, Hyprland IPC
 styx-receiver/   macOS binary: CGEvent injection, edge detection, TCP server
-dist/            PKGBUILD, systemd service, launchd plist, Homebrew formula
+dist/            PKGBUILD, systemd service, launchd plist, install scripts
 ```
 
 ## Acknowledgments
