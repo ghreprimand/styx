@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
-    CGEvent, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton, EventField,
+    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton, EventField,
     ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -180,8 +180,35 @@ impl Injector {
             mac_code as CGKeyCode,
             pressed,
         ) {
+            // Explicitly set modifier flags from our tracked state to prevent
+            // stale flags (e.g. Fn from Home/End keys) leaking into subsequent
+            // events via the CGEventSource.
+            event.set_flags(self.current_flags());
             event.post(CGEventTapLocation::HID);
         }
+    }
+
+    /// Build CGEventFlags from the currently held modifier keys.
+    fn current_flags(&self) -> CGEventFlags {
+        let mut flags = CGEventFlags::CGEventFlagNull;
+        for &code in &self.held_keys {
+            flags |= match code {
+                styx_keymap::KEY_LEFT_SHIFT | styx_keymap::KEY_RIGHT_SHIFT => {
+                    CGEventFlags::CGEventFlagShift
+                }
+                styx_keymap::KEY_LEFT_CTRL | styx_keymap::KEY_RIGHT_CTRL => {
+                    CGEventFlags::CGEventFlagControl
+                }
+                styx_keymap::KEY_LEFT_ALT | styx_keymap::KEY_RIGHT_ALT => {
+                    CGEventFlags::CGEventFlagAlternate
+                }
+                styx_keymap::KEY_LEFT_META | styx_keymap::KEY_RIGHT_META => {
+                    CGEventFlags::CGEventFlagCommand
+                }
+                _ => CGEventFlags::CGEventFlagNull,
+            };
+        }
+        flags
     }
 
     pub fn inject_scroll(&mut self, axis: u8, value: f64) {
