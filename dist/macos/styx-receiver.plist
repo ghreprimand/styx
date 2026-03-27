@@ -6,7 +6,7 @@
     <string>com.ghreprimand.styx-receiver</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/styx-receiver</string>
+        <string>/Applications/Styx Receiver.app/Contents/MacOS/styx-receiver</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -17,6 +17,12 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.ghreprimand.styx-receiver</string>
+    </array>
     <key>StandardOutPath</key>
     <string>/tmp/styx-receiver.stdout.log</string>
     <key>StandardErrorPath</key>

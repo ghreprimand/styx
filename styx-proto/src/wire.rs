@@ -20,9 +20,13 @@ pub enum Event {
     MouseScroll { axis: u8, value: f64 },
     KeyPress { code: u32 },
     KeyRelease { code: u32 },
-    CaptureBegin,
+    /// Sender → receiver: capture started. `edge_fraction` is the normalized
+    /// position along the crossing edge (0.0 = top/left, 1.0 = bottom/right).
+    CaptureBegin { edge_fraction: f64 },
     CaptureEnd,
-    ReturnToSender,
+    /// Cursor hit the return edge. `edge_fraction` is the normalized position
+    /// along the return edge where the cursor exited.
+    ReturnToSender { edge_fraction: f64 },
     Heartbeat,
     HeartbeatAck,
 }
@@ -35,9 +39,9 @@ impl Event {
             Event::MouseScroll { .. } => EVENT_MOUSE_SCROLL,
             Event::KeyPress { .. } => EVENT_KEY_PRESS,
             Event::KeyRelease { .. } => EVENT_KEY_RELEASE,
-            Event::CaptureBegin => EVENT_CAPTURE_BEGIN,
+            Event::CaptureBegin { .. } => EVENT_CAPTURE_BEGIN,
             Event::CaptureEnd => EVENT_CAPTURE_END,
-            Event::ReturnToSender => EVENT_RETURN_TO_SENDER,
+            Event::ReturnToSender { .. } => EVENT_RETURN_TO_SENDER,
             Event::Heartbeat => EVENT_HEARTBEAT,
             Event::HeartbeatAck => EVENT_HEARTBEAT_ACK,
         }
@@ -49,6 +53,7 @@ impl Event {
             Event::MouseButton { .. } => 5,
             Event::MouseScroll { .. } => 9,
             Event::KeyPress { .. } | Event::KeyRelease { .. } => 4,
+            Event::CaptureBegin { .. } | Event::ReturnToSender { .. } => 8,
             _ => 0,
         }
     }
@@ -69,6 +74,9 @@ impl Event {
             }
             Event::KeyPress { code } | Event::KeyRelease { code } => {
                 buf[0..4].copy_from_slice(&code.to_be_bytes());
+            }
+            Event::CaptureBegin { edge_fraction } | Event::ReturnToSender { edge_fraction } => {
+                buf[0..8].copy_from_slice(&edge_fraction.to_be_bytes());
             }
             _ => {}
         }
@@ -114,9 +122,21 @@ impl Event {
                 let code = u32::from_be_bytes(buf[0..4].try_into().unwrap());
                 Ok(Event::KeyRelease { code })
             }
-            EVENT_CAPTURE_BEGIN => Ok(Event::CaptureBegin),
+            EVENT_CAPTURE_BEGIN => {
+                if buf.len() < 8 {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let edge_fraction = f64::from_be_bytes(buf[0..8].try_into().unwrap());
+                Ok(Event::CaptureBegin { edge_fraction })
+            }
             EVENT_CAPTURE_END => Ok(Event::CaptureEnd),
-            EVENT_RETURN_TO_SENDER => Ok(Event::ReturnToSender),
+            EVENT_RETURN_TO_SENDER => {
+                if buf.len() < 8 {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let edge_fraction = f64::from_be_bytes(buf[0..8].try_into().unwrap());
+                Ok(Event::ReturnToSender { edge_fraction })
+            }
             EVENT_HEARTBEAT => Ok(Event::Heartbeat),
             EVENT_HEARTBEAT_ACK => Ok(Event::HeartbeatAck),
             _ => Err(DecodeError::UnknownEventType(type_byte)),
@@ -212,9 +232,9 @@ mod tests {
             Event::MouseScroll { axis: 1, value: 15.5 },
             Event::KeyPress { code: 42 },
             Event::KeyRelease { code: 42 },
-            Event::CaptureBegin,
+            Event::CaptureBegin { edge_fraction: 0.25 },
             Event::CaptureEnd,
-            Event::ReturnToSender,
+            Event::ReturnToSender { edge_fraction: 0.75 },
             Event::Heartbeat,
             Event::HeartbeatAck,
         ]

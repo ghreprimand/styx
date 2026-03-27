@@ -73,7 +73,7 @@ impl Edge {
 
 #[derive(Debug)]
 pub enum CaptureEvent {
-    Begin,
+    Begin { edge_fraction: f64 },
     Input(Event),
 }
 
@@ -125,6 +125,8 @@ struct State {
     pending_events: VecDeque<CaptureEvent>,
     output_info: Vec<(WlOutput, OutputInfo)>,
     scroll_discrete_pending: bool,
+    edge: Edge,
+    monitor_size: (i32, i32),
 }
 
 struct Inner {
@@ -191,6 +193,8 @@ impl Capture {
             pending_events: VecDeque::new(),
             output_info: vec![],
             scroll_discrete_pending: false,
+            edge,
+            monitor_size: (0, 0),
         };
 
         // Read wl_output globals.
@@ -212,6 +216,7 @@ impl Capture {
             .clone();
 
         log::info!("target monitor: {} ({}x{})", target_info.name, target_info.size.0, target_info.size.1);
+        state.monitor_size = target_info.size;
 
         // Create the edge surface.
         let (width, height) = match edge {
@@ -484,11 +489,21 @@ impl Dispatch<WlPointer, ()> for State {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { serial, surface, .. } => {
+            wl_pointer::Event::Enter { serial, surface, surface_x, surface_y, .. } => {
                 if let Some(window) = &state.window {
                     if window.surface == surface {
+                        let edge_fraction = match state.edge {
+                            Edge::Left | Edge::Right => {
+                                let h = state.monitor_size.1 as f64;
+                                if h > 0.0 { (surface_y / h).clamp(0.0, 1.0) } else { 0.5 }
+                            }
+                            Edge::Top | Edge::Bottom => {
+                                let w = state.monitor_size.0 as f64;
+                                if w > 0.0 { (surface_x / w).clamp(0.0, 1.0) } else { 0.5 }
+                            }
+                        };
                         state.grab(&surface, pointer, serial);
-                        state.pending_events.push_back(CaptureEvent::Begin);
+                        state.pending_events.push_back(CaptureEvent::Begin { edge_fraction });
                     }
                 }
             }

@@ -51,7 +51,11 @@ impl Injector {
             .map_err(|_| "failed to create CGEventSource")?;
 
         let bounds = compute_display_bounds();
-        let cursor_pos = entry_point(&bounds, return_edge);
+        log::info!(
+            "display bounds: x=[{}, {}] y=[{}, {}]",
+            bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
+        );
+        let cursor_pos = entry_point(&bounds, return_edge, 0.5);
 
         Ok(Injector {
             source,
@@ -207,19 +211,33 @@ impl Injector {
         }
     }
 
-    pub fn reset_cursor_to_entry(&mut self) {
-        self.cursor_pos = entry_point(&self.display_bounds, self.return_edge);
+    pub fn reset_cursor_to_entry(&mut self, edge_fraction: f64) {
+        self.cursor_pos = entry_point(&self.display_bounds, self.return_edge, edge_fraction);
+    }
+
+    /// Returns the normalized position (0.0–1.0) along the return edge.
+    pub fn edge_fraction(&self) -> f64 {
+        let (span_min, span_max, pos) = match self.return_edge {
+            Edge::Left | Edge::Right => {
+                (self.display_bounds.min_y, self.display_bounds.max_y, self.cursor_pos.y)
+            }
+            Edge::Top | Edge::Bottom => {
+                (self.display_bounds.min_x, self.display_bounds.max_x, self.cursor_pos.x)
+            }
+        };
+        let span = span_max - span_min;
+        if span > 0.0 { ((pos - span_min) / span).clamp(0.0, 1.0) } else { 0.5 }
     }
 }
 
-fn entry_point(bounds: &DisplayBounds, return_edge: Edge) -> CGPoint {
-    let cx = (bounds.min_x + bounds.max_x) / 2.0;
-    let cy = (bounds.min_y + bounds.max_y) / 2.0;
+fn entry_point(bounds: &DisplayBounds, return_edge: Edge, fraction: f64) -> CGPoint {
+    let fx = bounds.min_x + fraction * (bounds.max_x - bounds.min_x);
+    let fy = bounds.min_y + fraction * (bounds.max_y - bounds.min_y);
     match return_edge {
-        Edge::Right => CGPoint::new(bounds.max_x - 2.0, cy),
-        Edge::Left => CGPoint::new(bounds.min_x + 2.0, cy),
-        Edge::Bottom => CGPoint::new(cx, bounds.max_y - 2.0),
-        Edge::Top => CGPoint::new(cx, bounds.min_y + 2.0),
+        Edge::Right => CGPoint::new(bounds.min_x + 2.0, fy),
+        Edge::Left => CGPoint::new(bounds.max_x - 2.0, fy),
+        Edge::Bottom => CGPoint::new(fx, bounds.min_y + 2.0),
+        Edge::Top => CGPoint::new(fx, bounds.max_y - 2.0),
     }
 }
 

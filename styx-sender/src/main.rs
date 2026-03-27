@@ -180,7 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break 'outer;
                     };
                     match event {
-                        CaptureEvent::Begin => {
+                        CaptureEvent::Begin { edge_fraction } => {
+                            if capturing {
+                                continue;
+                            }
                             if let Some(cooldown_until) = return_cooldown {
                                 if time::Instant::now() < cooldown_until {
                                     wayland_capture.release();
@@ -205,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for code in evdev_capture.held_modifiers() {
                                 let _ = transport.send(&Event::KeyPress { code }).await;
                             }
-                            let _ = transport.send(&Event::CaptureBegin).await;
+                            let _ = transport.send(&Event::CaptureBegin { edge_fraction }).await;
                             log::info!("capture active");
                         }
                         CaptureEvent::Input(event) => {
@@ -233,13 +236,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 result = transport.recv(), if transport.is_connected() => {
                     match result {
-                        Ok(Event::ReturnToSender) => {
-                            log::info!("return signal received");
+                        Ok(Event::ReturnToSender { edge_fraction }) => {
+                            log::info!("return signal received (fraction={edge_fraction:.2})");
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
 
                             if let Ok(geom) = hyprland::get_monitor(&config.sender.monitor).await {
                                 let x = geom.x + 100;
-                                let y = geom.y + geom.height / 2;
+                                let y = geom.y + (edge_fraction * geom.height as f64) as i32;
                                 let _ = hyprland::warp_cursor(x, y).await;
                             }
 
