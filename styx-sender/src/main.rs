@@ -160,6 +160,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Outer loop: connect, run event loop, reconnect on failure.
     'outer: loop {
         transport.connect().await?;
+        // Brief settle time so the receiver's event loop can start
+        // processing before we fire recv().
+        time::sleep(Duration::from_millis(50)).await;
 
         let mut missed_heartbeats: u32 = 0;
         let mut heartbeat_interval = time::interval(Duration::from_millis(
@@ -255,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             log::error!("recv error: {e}");
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
                             transport.disconnect();
+                            time::sleep(Duration::from_secs(1)).await;
                             break; // reconnect
                         }
                     }
@@ -265,6 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         log::warn!("heartbeat timeout, connection dead");
                         release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
                         transport.disconnect();
+                        time::sleep(Duration::from_secs(1)).await;
                         break; // reconnect
                     } else {
                         let _ = transport.send(&Event::Heartbeat).await;

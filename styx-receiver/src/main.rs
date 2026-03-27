@@ -109,12 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         tokio::select! {
-            result = listener.accept() => {
+            result = listener.accept(), if !transport.is_connected() => {
                 match result {
                     Ok((stream, peer)) => {
-                        log::info!("new connection from {peer}, replacing previous");
-                        injector.release_all_keys();
-                        transport.disconnect();
+                        log::info!("accepted connection from {peer}");
                         transport.set_stream(stream);
                         injector.reset_cursor_to_entry();
                     }
