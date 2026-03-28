@@ -108,9 +108,15 @@ impl EvdevCapture {
         self.device.as_raw_fd()
     }
 
-    pub fn read_events(&mut self) -> Vec<Event> {
-        let Ok(events) = self.device.fetch_events() else {
-            return vec![];
+    /// Returns `Some(events)` on success, `None` if the device is gone.
+    pub fn read_events(&mut self) -> Option<Vec<Event>> {
+        let events = match self.device.fetch_events() {
+            Ok(events) => events,
+            Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => return Some(vec![]),
+            Err(e) => {
+                log::warn!("evdev read failed: {e}");
+                return None;
+            }
         };
 
         let mut out = Vec::new();
@@ -141,7 +147,7 @@ impl EvdevCapture {
                 }
             }
         }
-        out
+        Some(out)
     }
 }
 
