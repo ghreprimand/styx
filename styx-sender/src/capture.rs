@@ -75,6 +75,7 @@ impl Edge {
 pub enum CaptureEvent {
     Begin { from_bottom: f64, source_height: f64 },
     Input(Event),
+    Released,
 }
 
 struct Globals {
@@ -522,10 +523,12 @@ impl Dispatch<WlPointer, ()> for State {
                 }
             }
             wl_pointer::Event::Leave { .. } => {
-                if state.pointer_lock.is_some() {
-                    log::warn!("compositor released pointer unexpectedly");
-                }
+                let was_locked = state.pointer_lock.is_some();
                 state.ungrab();
+                if was_locked {
+                    log::warn!("compositor released pointer unexpectedly");
+                    state.pending_events.push_back(CaptureEvent::Released);
+                }
             }
             wl_pointer::Event::Button { time: _, button, state: btn_state, .. } => {
                 if state.focused {

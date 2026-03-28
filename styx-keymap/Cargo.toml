@@ -1,6 +1,6 @@
 [package]
 name = "styx-keymap"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

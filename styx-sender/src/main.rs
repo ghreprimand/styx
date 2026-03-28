@@ -237,6 +237,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        CaptureEvent::Released => {
+                            if capturing {
+                                log::warn!("compositor forced pointer release, ending capture");
+                                release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                            }
+                        }
                         CaptureEvent::Input(event) => {
                             if capturing {
                                 if let Err(e) = transport.send(&event).await {
