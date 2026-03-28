@@ -216,7 +216,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Err(e) = evdev_capture.grab() {
                                 log::error!("evdev grab failed: {e}");
                                 capturing = false;
+                                kbd_available = false;
                                 wayland_capture.release();
+                                log::warn!("keyboard device lost (grab failed)");
                                 continue;
                             }
 
