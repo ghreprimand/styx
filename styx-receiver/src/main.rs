@@ -35,6 +35,8 @@ struct ReceiverConfig {
     listen_port: u16,
     #[serde(default = "default_return_edge")]
     return_edge: String,
+    #[serde(default)]
+    swap_alt_cmd: bool,
 }
 
 fn default_return_edge() -> String {
@@ -115,7 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("listening on {addr}");
 
     let mut transport = ReceiverTransport::new();
-    let mut injector = Injector::new(return_edge)?;
+    let mut injector = Injector::new(return_edge, config.receiver.swap_alt_cmd)?;
+    if config.receiver.swap_alt_cmd {
+        log::info!("modifier remap: Alt->Cmd, Super->Option (swap_alt_cmd=true)");
+    }
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;

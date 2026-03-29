@@ -26,6 +26,7 @@ pub struct Injector {
     display_bounds: DisplayBounds,
     edge_span: EdgeSpan,
     return_edge: Edge,
+    swap_alt_cmd: bool,
 }
 
 struct ButtonState {
@@ -54,7 +55,7 @@ const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
 impl Injector {
-    pub fn new(return_edge: Edge) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(return_edge: Edge, swap_alt_cmd: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| "failed to create CGEventSource")?;
 
@@ -85,6 +86,7 @@ impl Injector {
             display_bounds: bounds,
             edge_span,
             return_edge,
+            swap_alt_cmd,
         })
     }
 
@@ -187,6 +189,7 @@ impl Injector {
     }
 
     pub fn inject_key(&mut self, code: u32, pressed: bool) {
+        let code = if self.swap_alt_cmd { swap_alt_meta(code) } else { code };
         let Some(mac_code) = styx_keymap::evdev_to_macos(code as u16) else {
             log::warn!("unmapped evdev key: {code}");
             return;
@@ -379,5 +382,18 @@ fn key_flags(mac_code: u16) -> CGEventFlags {
         // Home, End, Page Up, Page Down, Forward Delete
         0x73 | 0x77 | 0x74 | 0x79 | 0x75 => CGEventFlags::CGEventFlagSecondaryFn,
         _ => CGEventFlags::CGEventFlagNull,
+    }
+}
+
+/// Swap Alt and Super/Meta evdev codes so physical key positions match macOS
+/// layout: PC Super (position 2) becomes Option, PC Alt (position 3) becomes
+/// Command.
+fn swap_alt_meta(code: u32) -> u32 {
+    match code {
+        styx_keymap::KEY_LEFT_ALT => styx_keymap::KEY_LEFT_META,
+        styx_keymap::KEY_RIGHT_ALT => styx_keymap::KEY_RIGHT_META,
+        styx_keymap::KEY_LEFT_META => styx_keymap::KEY_LEFT_ALT,
+        styx_keymap::KEY_RIGHT_META => styx_keymap::KEY_RIGHT_ALT,
+        other => other,
     }
 }
