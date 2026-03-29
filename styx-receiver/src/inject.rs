@@ -206,7 +206,7 @@ impl Injector {
             // Explicitly set modifier flags from our tracked state to prevent
             // stale flags (e.g. Fn from Home/End keys) leaking into subsequent
             // events via the CGEventSource.
-            event.set_flags(self.current_flags());
+            event.set_flags(self.current_flags() | key_flags(mac_code));
             event.post(CGEventTapLocation::HID);
         }
     }
@@ -363,4 +363,21 @@ fn compute_display_bounds() -> DisplayBounds {
     }
 
     DisplayBounds { min_x, min_y, max_x, max_y }
+}
+
+/// Extra flags macOS expects on certain keys. Arrow keys carry SecondaryFn
+/// and NumericPad; function and navigation keys carry SecondaryFn.
+fn key_flags(mac_code: u16) -> CGEventFlags {
+    match mac_code {
+        // Arrow keys
+        0x7B | 0x7C | 0x7D | 0x7E => {
+            CGEventFlags::CGEventFlagSecondaryFn | CGEventFlags::CGEventFlagNumericPad
+        }
+        // F1-F12
+        0x7A | 0x78 | 0x63 | 0x76 | 0x60 | 0x61 | 0x62 | 0x64 | 0x65 | 0x6D | 0x67
+        | 0x6F => CGEventFlags::CGEventFlagSecondaryFn,
+        // Home, End, Page Up, Page Down, Forward Delete
+        0x73 | 0x77 | 0x74 | 0x79 | 0x75 => CGEventFlags::CGEventFlagSecondaryFn,
+        _ => CGEventFlags::CGEventFlagNull,
+    }
 }
