@@ -1,5 +1,5 @@
 pkgname=styx-sender
-pkgver=0.1.8
+pkgver=0.1.9
 pkgrel=1
 pkgdesc="Software KVM sender for sharing keyboard/mouse from Hyprland to macOS"
 arch=('x86_64')
