@@ -26,3 +26,7 @@ listen_port = 4242
 # cursor hits this edge, control returns to the sender.
 # Options: left, right, top, bottom (default: right)
 return_edge = "right"
+
+# Swap Alt and Super/Meta so physical key positions match macOS layout:
+# PC Ctrl|Super|Alt maps to Mac Control|Option|Command by position.
+# swap_alt_cmd = true
