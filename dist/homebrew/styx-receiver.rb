@@ -1,8 +1,8 @@
 class StyxReceiver < Formula
   desc "Software KVM receiver for macOS -- receives keyboard/mouse from a Hyprland Linux machine"
   homepage "https://github.com/ghreprimand/styx"
-  url "https://github.com/ghreprimand/styx/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "PLACEHOLDER"
+  url "https://github.com/ghreprimand/styx/archive/refs/tags/v0.2.1.tar.gz"
+  sha256 "SKIP"
   license "MIT"
 
   depends_on "rust" => :build

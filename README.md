@@ -109,6 +109,7 @@ edge = "left"
 listen_host = "0.0.0.0"
 listen_port = 4242
 return_edge = "right"
+# swap_alt_cmd = true
 ```
 
 | Option | Description |
@@ -116,6 +117,7 @@ return_edge = "right"
 | `listen_host` | Address to bind (use `0.0.0.0` for all interfaces) |
 | `listen_port` | TCP port to listen on (default: 4242) |
 | `return_edge` | Which display edge faces the Linux machine: `left`, `right`, `top`, `bottom` (default: `right`) |
+| `swap_alt_cmd` | (optional) Swap Alt and Super so physical key positions match the macOS Control/Option/Command layout (default: `false`) |
 
 ## Running
 
@@ -201,7 +203,7 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 - Styx accounts for Hyprland monitor transforms (90/270 rotation). If positions are still wrong, check that `hyprctl -j monitors` shows the correct `transform` value for your portrait monitor.
 
 **Keys trigger wrong shortcuts on Mac:**
-- Linux Left Alt maps to macOS Option, and Linux Super maps to macOS Command. This matches the physical key positions but differs from Linux shortcut conventions. Muscle memory adjustment is expected.
+- By default, Linux Left Alt maps to macOS Option and Linux Super maps to macOS Command. Set `swap_alt_cmd = true` in the receiver config to swap these so the physical key positions match the standard macOS layout (Super becomes Option, Alt becomes Command).
 
 ## Design Decisions
 
