@@ -159,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut capturing = false;
     let mut return_cooldown: Option<time::Instant>;
     let mut last_clip_hash: u64 = 0;
+    let mut clean_exit = false;
 
     clipboard::check_tools();
     log::info!("styx-sender running (monitor={}, edge={:?})", config.sender.monitor, edge);
@@ -344,10 +345,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 _ = sigterm.recv() => {
                     log::info!("SIGTERM received, shutting down");
+                    clean_exit = true;
                     break 'outer;
                 }
                 _ = sigint.recv() => {
                     log::info!("SIGINT received, shutting down");
+                    clean_exit = true;
                     break 'outer;
                 }
             }
@@ -365,7 +368,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     transport.disconnect();
     log::info!("shutdown complete");
-    Ok(())
+
+    if clean_exit {
+        Ok(())
+    } else {
+        Err("wayland connection lost".into())
+    }
 }
 
 async fn release_capture(
