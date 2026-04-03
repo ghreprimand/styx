@@ -1,6 +1,9 @@
 # Sender configuration (Linux/Hyprland side).
 [sender]
+# Single address:
 receiver_host = "192.168.1.100"
+# Or multiple addresses (tried in order on each connection attempt):
+# receiver_hosts = ["192.168.1.100", "192.168.1.101"]
 receiver_port = 4242
 
 # Monitor name (from `hyprctl monitors`) and edge to trigger capture.

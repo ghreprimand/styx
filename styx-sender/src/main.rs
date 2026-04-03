@@ -34,7 +34,12 @@ struct Config {
 
 #[derive(Deserialize)]
 struct SenderConfig {
-    receiver_host: String,
+    /// Single receiver address (kept for backwards compatibility).
+    #[serde(default)]
+    receiver_host: Option<String>,
+    /// Multiple receiver addresses; the sender tries each in order.
+    #[serde(default)]
+    receiver_hosts: Option<Vec<String>>,
     receiver_port: u16,
     monitor: String,
     edge: String,
@@ -139,13 +144,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let addr: SocketAddr = format!(
-        "{}:{}",
-        config.sender.receiver_host, config.sender.receiver_port
-    )
-    .parse()?;
+    let mut hosts: Vec<String> = Vec::new();
+    if let Some(host) = &config.sender.receiver_host {
+        hosts.push(host.clone());
+    }
+    if let Some(extra) = &config.sender.receiver_hosts {
+        for h in extra {
+            if !hosts.contains(h) {
+                hosts.push(h.clone());
+            }
+        }
+    }
+    if hosts.is_empty() {
+        return Err("config must set receiver_host or receiver_hosts".into());
+    }
 
-    let mut transport = SenderTransport::new(addr);
+    let addrs: Vec<SocketAddr> = hosts
+        .iter()
+        .map(|h| format!("{h}:{}", config.sender.receiver_port).parse())
+        .collect::<Result<_, _>>()?;
+
+    let mut transport = SenderTransport::new(addrs);
     let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge)?;
     let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
     let mut async_evdev = AsyncEvdev::new(&evdev_capture)?;

@@ -89,6 +89,8 @@ Create `~/.config/styx/config.toml` on each machine. A full example is at `dist/
 ```toml
 [sender]
 receiver_host = "192.168.1.100"
+# or, if the Mac has multiple IPs (ethernet + wifi):
+# receiver_hosts = ["192.168.1.100", "192.168.1.101"]
 receiver_port = 4242
 monitor = "DP-1"
 edge = "left"
@@ -97,6 +99,7 @@ edge = "left"
 | Option | Description |
 |--------|-------------|
 | `receiver_host` | IP address of the Mac on the local network |
+| `receiver_hosts` | (optional) list of IP addresses to try in order, e.g. `["192.168.1.100", "192.168.1.101"]`. Use this when the Mac has multiple network interfaces (ethernet + wifi). At least one of `receiver_host` or `receiver_hosts` must be set. |
 | `receiver_port` | TCP port the receiver is listening on (default: 4242) |
 | `monitor` | Hyprland output name where the edge surface is placed (from `hyprctl monitors`) |
 | `edge` | Which side of the monitor triggers capture: `left`, `right`, `top`, `bottom` |
