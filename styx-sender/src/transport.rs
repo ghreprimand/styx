@@ -9,14 +9,14 @@ use styx_proto::{self, Event, read_event, write_event};
 
 pub struct SenderTransport {
     stream: Option<TcpStream>,
-    addr: SocketAddr,
+    addrs: Vec<SocketAddr>,
 }
 
 impl SenderTransport {
-    pub fn new(addr: SocketAddr) -> Self {
+    pub fn new(addrs: Vec<SocketAddr>) -> Self {
         SenderTransport {
             stream: None,
-            addr,
+            addrs,
         }
     }
 
@@ -27,26 +27,28 @@ impl SenderTransport {
     pub async fn connect(&mut self) -> io::Result<()> {
         let mut backoff = Duration::from_secs(1);
         loop {
-            match time::timeout(Duration::from_secs(5), TcpStream::connect(self.addr)).await {
-                Ok(Ok(stream)) => {
-                    stream.set_nodelay(true)?;
-                    // Enable TCP keepalive so the OS detects dead connections.
-                    let sock = socket2::SockRef::from(&stream);
-                    let keepalive = socket2::TcpKeepalive::new()
-                        .with_time(Duration::from_secs(5))
-                        .with_interval(Duration::from_secs(5));
-                    let _ = sock.set_tcp_keepalive(&keepalive);
-                    log::info!("connected to {}", self.addr);
-                    self.stream = Some(stream);
-                    return Ok(());
-                }
-                Ok(Err(e)) => {
-                    log::warn!("connection to {} failed: {e}, retrying in {backoff:?}", self.addr);
-                }
-                Err(_) => {
-                    log::warn!("connection to {} timed out, retrying in {backoff:?}", self.addr);
+            for &addr in &self.addrs {
+                match time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+                    Ok(Ok(stream)) => {
+                        stream.set_nodelay(true)?;
+                        let sock = socket2::SockRef::from(&stream);
+                        let keepalive = socket2::TcpKeepalive::new()
+                            .with_time(Duration::from_secs(5))
+                            .with_interval(Duration::from_secs(5));
+                        let _ = sock.set_tcp_keepalive(&keepalive);
+                        log::info!("connected to {addr}");
+                        self.stream = Some(stream);
+                        return Ok(());
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("connection to {addr} failed: {e}");
+                    }
+                    Err(_) => {
+                        log::warn!("connection to {addr} timed out");
+                    }
                 }
             }
+            log::info!("retrying in {backoff:?}");
             time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
@@ -68,7 +70,7 @@ impl SenderTransport {
 
     pub fn disconnect(&mut self) {
         if self.stream.take().is_some() {
-            log::info!("disconnected from {}", self.addr);
+            log::info!("disconnected");
         }
     }
 }
