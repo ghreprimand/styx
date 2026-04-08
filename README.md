@@ -208,6 +208,16 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 **Keys trigger wrong shortcuts on Mac:**
 - By default, Linux Left Alt maps to macOS Option and Linux Super maps to macOS Command. Set `swap_alt_cmd = true` in the receiver config to swap these so the physical key positions match the standard macOS layout (Super becomes Option, Alt becomes Command).
 
+**Keyboard stops working after sender starts (Hyprland):**
+- `styx-sender` grabs the keyboard via `EVIOCGRAB` on startup. If it starts before Hyprland has initialized its input stack, Hyprland never sees keyboard events. The sender's `WantedBy=graphical-session.target` unit can race against compositor startup.
+- Fix: add a drop-in at `~/.config/systemd/user/styx-sender.service.d/wait-for-hyprland.conf`:
+  ```ini
+  [Service]
+  ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do hyprctl monitors >/dev/null 2>&1 && exit 0; sleep 0.5; done; exit 0'
+  ```
+  This polls until Hyprland is responsive before the sender starts, capped at 15 seconds.
+- Mouse events are unaffected (they arrive via the layer-shell surface, not evdev), so only keyboard input breaks on a racing start.
+
 ## Design Decisions
 
 - **TCP, not UDP.** Eliminates stuck keys. TCP guarantees delivery and ordering. The sub-millisecond latency penalty on a LAN is imperceptible for HID events.
