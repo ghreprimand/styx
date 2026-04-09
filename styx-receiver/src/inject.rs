@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
@@ -29,10 +30,43 @@ pub struct Injector {
     swap_alt_cmd: bool,
 }
 
+// macOS default double-click interval
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
+struct ButtonTracker {
+    pressed: bool,
+    click_count: i64,
+    last_press: Option<Instant>,
+}
+
+impl ButtonTracker {
+    fn new() -> Self {
+        ButtonTracker { pressed: false, click_count: 0, last_press: None }
+    }
+
+    /// Called on press. Updates click count and returns it.
+    fn on_press(&mut self) -> i64 {
+        let now = Instant::now();
+        self.click_count = if self.last_press.map_or(false, |t| now.duration_since(t) <= DOUBLE_CLICK_INTERVAL) {
+            self.click_count + 1
+        } else {
+            1
+        };
+        self.last_press = Some(now);
+        self.pressed = true;
+        self.click_count
+    }
+
+    fn on_release(&mut self) -> i64 {
+        self.pressed = false;
+        self.click_count
+    }
+}
+
 struct ButtonState {
-    left: bool,
-    right: bool,
-    middle: bool,
+    left: ButtonTracker,
+    right: ButtonTracker,
+    middle: ButtonTracker,
 }
 
 #[derive(Clone)]
@@ -78,9 +112,9 @@ impl Injector {
             source,
             held_keys: HashSet::new(),
             button_state: ButtonState {
-                left: false,
-                right: false,
-                middle: false,
+                left: ButtonTracker::new(),
+                right: ButtonTracker::new(),
+                middle: ButtonTracker::new(),
             },
             cursor_pos,
             display_bounds: bounds,
@@ -116,11 +150,11 @@ impl Injector {
         let new_y = (self.cursor_pos.y + dy).clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0);
         self.cursor_pos = CGPoint::new(new_x, new_y);
 
-        let event_type = if self.button_state.left {
+        let event_type = if self.button_state.left.pressed {
             CGEventType::LeftMouseDragged
-        } else if self.button_state.right {
+        } else if self.button_state.right.pressed {
             CGEventType::RightMouseDragged
-        } else if self.button_state.middle {
+        } else if self.button_state.middle.pressed {
             CGEventType::OtherMouseDragged
         } else {
             CGEventType::MouseMoved
@@ -147,30 +181,33 @@ impl Injector {
 
     pub fn inject_mouse_button(&mut self, button: u32, state: u8) {
         let pressed = state == 1;
-        let (event_type, cg_button) = match button {
+        let (event_type, cg_button, click_count) = match button {
             BTN_LEFT => {
-                self.button_state.left = pressed;
-                if pressed {
-                    (CGEventType::LeftMouseDown, CGMouseButton::Left)
+                let count = if pressed {
+                    self.button_state.left.on_press()
                 } else {
-                    (CGEventType::LeftMouseUp, CGMouseButton::Left)
-                }
+                    self.button_state.left.on_release()
+                };
+                let event_type = if pressed { CGEventType::LeftMouseDown } else { CGEventType::LeftMouseUp };
+                (event_type, CGMouseButton::Left, count)
             }
             BTN_RIGHT => {
-                self.button_state.right = pressed;
-                if pressed {
-                    (CGEventType::RightMouseDown, CGMouseButton::Right)
+                let count = if pressed {
+                    self.button_state.right.on_press()
                 } else {
-                    (CGEventType::RightMouseUp, CGMouseButton::Right)
-                }
+                    self.button_state.right.on_release()
+                };
+                let event_type = if pressed { CGEventType::RightMouseDown } else { CGEventType::RightMouseUp };
+                (event_type, CGMouseButton::Right, count)
             }
             BTN_MIDDLE => {
-                self.button_state.middle = pressed;
-                if pressed {
-                    (CGEventType::OtherMouseDown, CGMouseButton::Center)
+                let count = if pressed {
+                    self.button_state.middle.on_press()
                 } else {
-                    (CGEventType::OtherMouseUp, CGMouseButton::Center)
-                }
+                    self.button_state.middle.on_release()
+                };
+                let event_type = if pressed { CGEventType::OtherMouseDown } else { CGEventType::OtherMouseUp };
+                (event_type, CGMouseButton::Center, count)
             }
             _ => return,
         };
@@ -181,9 +218,7 @@ impl Injector {
             self.cursor_pos,
             cg_button,
         ) {
-            // Set click count on both down and up so UI elements that check
-            // the full click sequence recognize it.
-            event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
+            event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_count);
             event.post(CGEventTapLocation::HID);
         }
     }
@@ -272,13 +307,13 @@ impl Injector {
             }
         }
 
-        if self.button_state.left {
+        if self.button_state.left.pressed {
             self.inject_mouse_button(BTN_LEFT, 0);
         }
-        if self.button_state.right {
+        if self.button_state.right.pressed {
             self.inject_mouse_button(BTN_RIGHT, 0);
         }
-        if self.button_state.middle {
+        if self.button_state.middle.pressed {
             self.inject_mouse_button(BTN_MIDDLE, 0);
         }
     }
