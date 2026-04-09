@@ -746,21 +746,21 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "styx-keymap"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "keycode",
 ]
 
 [[package]]
 name = "styx-proto"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "styx-receiver"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bitflags 2.11.0",
  "clap",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "styx-sender"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "env_logger",
