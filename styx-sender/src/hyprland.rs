@@ -12,6 +12,7 @@ struct Monitor {
     width: i32,
     height: i32,
     transform: i32,
+    scale: f64,
 }
 
 pub struct MonitorGeometry {
@@ -43,13 +44,17 @@ pub async fn get_monitor(name: &str) -> Result<MonitorGeometry, Box<dyn std::err
         .into_iter()
         .find(|m| m.name == name)
         .ok_or_else(|| format!("monitor '{}' not found via Hyprland IPC", name))?;
-    // Hyprland reports native (pre-rotation) width/height.
-    // Swap for 90° (1) and 270° (3) transforms.
-    let h = if mon.transform == 1 || mon.transform == 3 {
+    // Hyprland reports native (pre-rotation, pre-scale) width/height.
+    // Swap for 90° (1) and 270° (3) transforms, then divide by scale so
+    // the result matches the logical coordinates used by movecursor and
+    // by the Wayland layer surface.
+    let native_h = if mon.transform == 1 || mon.transform == 3 {
         mon.width
     } else {
         mon.height
     };
+    let scale = if mon.scale > 0.0 { mon.scale } else { 1.0 };
+    let h = (native_h as f64 / scale).round() as i32;
     Ok(MonitorGeometry {
         x: mon.x,
         y: mon.y,
