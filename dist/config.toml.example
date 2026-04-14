@@ -8,6 +8,11 @@ receiver_port = 4242
 
 # Monitor name (from `hyprctl monitors`) and edge to trigger capture.
 monitor = "DP-1"
+# For a crossover edge that spans multiple Hyprland monitors (e.g. two
+# stacked displays sharing a left edge), list them instead. All listed
+# monitors share the same `edge` below, and their Y (or X) ranges are
+# unioned so the receiver can map cursor position across the stack.
+# monitors = ["HDMI-A-1", "DP-1"]
 edge = "left"
 
 # evdev device path for keyboard capture. Optional -- if omitted, styx
