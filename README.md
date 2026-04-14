@@ -26,6 +26,8 @@ The sender creates a 1-pixel invisible surface on the configured screen edge usi
 
 The receiver injects these events into macOS using the Core Graphics accessibility APIs. When the cursor hits the configured return edge of the Mac's display, the receiver signals the sender to release the grab and warp the cursor back to the Linux machine.
 
+The receiver tracks per-button click counts within a 500 ms interval so double- and triple-clicks register correctly on macOS. It also declares user activity on every injected event, so a Mac whose external display has gone to sleep via idle timeout wakes on the first crossover input -- synthesized `CGEvent` posts alone do not wake a slept display.
+
 TCP eliminates the stuck key problem entirely. Delivery is guaranteed by the kernel -- no dropped events, no acknowledgment protocol needed. For HID events on a LAN, the latency difference between TCP and UDP is imperceptible.
 
 Text clipboard is synced automatically on each transition. When the cursor crosses from Linux to Mac, the Linux clipboard is pushed to macOS. When it returns, the macOS clipboard is pushed back. Copy on either machine, paste on either machine. Requires `wl-clipboard` (`wl-paste`/`wl-copy`) on the Linux side; macOS uses the built-in `pbcopy`/`pbpaste`.
