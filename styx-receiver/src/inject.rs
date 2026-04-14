@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use core_foundation::base::TCFType;
+use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton, EventField,
@@ -10,6 +12,17 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 use styx_keymap;
+
+const K_IOPM_USER_ACTIVE_LOCAL: u32 = 0;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionDeclareUserActivity(
+        assertion_name: CFStringRef,
+        user_type: u32,
+        assertion_id: *mut u32,
+    ) -> i32;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
@@ -28,6 +41,8 @@ pub struct Injector {
     edge_span: EdgeSpan,
     return_edge: Edge,
     swap_alt_cmd: bool,
+    assertion_name: CFString,
+    assertion_id: u32,
 }
 
 // macOS default double-click interval
@@ -121,7 +136,21 @@ impl Injector {
             edge_span,
             return_edge,
             swap_alt_cmd,
+            assertion_name: CFString::new("styx-receiver"),
+            assertion_id: 0,
         })
+    }
+
+    /// Tell macOS a user just did something. Wakes a slept external display
+    /// (CGEvent injection alone does not) and resets the idle timer.
+    fn declare_user_activity(&mut self) {
+        unsafe {
+            IOPMAssertionDeclareUserActivity(
+                self.assertion_name.as_concrete_TypeRef(),
+                K_IOPM_USER_ACTIVE_LOCAL,
+                &mut self.assertion_id,
+            );
+        }
     }
 
     /// Recreate the CGEventSource and recompute display geometry.
@@ -146,6 +175,7 @@ impl Injector {
 
     /// Returns true if the cursor hit the return edge.
     pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
+        self.declare_user_activity();
         let new_x = (self.cursor_pos.x + dx).clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0);
         let new_y = (self.cursor_pos.y + dy).clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0);
         self.cursor_pos = CGPoint::new(new_x, new_y);
@@ -180,6 +210,7 @@ impl Injector {
     }
 
     pub fn inject_mouse_button(&mut self, button: u32, state: u8) {
+        self.declare_user_activity();
         let pressed = state == 1;
         let (event_type, cg_button, click_count) = match button {
             BTN_LEFT => {
@@ -224,6 +255,7 @@ impl Injector {
     }
 
     pub fn inject_key(&mut self, code: u32, pressed: bool) {
+        self.declare_user_activity();
         let code = if self.swap_alt_cmd { swap_alt_meta(code) } else { code };
         let Some(mac_code) = styx_keymap::evdev_to_macos(code as u16) else {
             log::warn!("unmapped evdev key: {code}");
@@ -273,6 +305,7 @@ impl Injector {
     }
 
     pub fn inject_scroll(&mut self, axis: u8, value: f64) {
+        self.declare_user_activity();
         let (v, h) = if axis == 0 {
             // Negate vertical scroll: Linux/Wayland and macOS use opposite
             // sign conventions for scroll direction.
