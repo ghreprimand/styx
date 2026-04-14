@@ -106,7 +106,7 @@ edge = "left"
 |--------|-------------|
 | `receiver_host` | IP address of the Mac on the local network |
 | `receiver_hosts` | (optional) list of IP addresses to try in order, e.g. `["192.168.1.100", "192.168.1.101"]`. Use this when the Mac has multiple network interfaces (ethernet + wifi). At least one of `receiver_host` or `receiver_hosts` must be set. |
-| `receiver_port` | TCP port the receiver is listening on (default: 4242) |
+| `receiver_port` | TCP port the receiver is listening on (required; 4242 is conventional and matches `dist/config.toml.example`) |
 | `monitor` | Hyprland output name where the edge surface is placed (from `hyprctl monitors`). Use this for a single-monitor crossover edge. |
 | `monitors` | (optional) list of Hyprland output names whose `edge` sides together form one virtual crossover edge, e.g. `["HDMI-A-1", "DP-1"]` for two stacked displays sharing a left edge. Exactly one of `monitor` or `monitors` must be set. |
 | `edge` | Which side of the monitor(s) triggers capture: `left`, `right`, `top`, `bottom`. Shared by every entry in `monitors`. |
@@ -125,7 +125,7 @@ return_edge = "right"
 | Option | Description |
 |--------|-------------|
 | `listen_host` | Address to bind (use `0.0.0.0` for all interfaces) |
-| `listen_port` | TCP port to listen on (default: 4242) |
+| `listen_port` | TCP port to listen on (required; 4242 is conventional and must match the sender's `receiver_port`) |
 | `return_edge` | Which display edge faces the Linux machine: `left`, `right`, `top`, `bottom` (default: `right`) |
 | `swap_alt_cmd` | (optional) Swap Alt and Super so physical key positions match the macOS Control/Option/Command layout (default: `false`) |
 
