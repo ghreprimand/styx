@@ -60,6 +60,8 @@ After the first successful round-trip, the sender learns the receiver's screen h
 
 Portrait (rotated) monitors are handled automatically -- styx accounts for Hyprland's monitor transform when computing cursor positions. Scaled (HiDPI) Linux monitors are also handled automatically -- all cursor math uses logical coordinates, consistent with Hyprland's `scale` setting.
 
+A crossover edge can span multiple stacked monitors on either side. On the sender, list them as `monitors = [...]` and styx creates one layer surface per monitor, treating their unioned Y (or X) range as a single virtual edge. On the receiver, any displays whose own return edge lines up with the outermost edge (within 64 points of tolerance) are unioned the same way, so a portrait monitor stacked above a laptop display both participate in the crossover. Cursor positions map 1:1 between the combined sender and receiver edges, and the receiver places the cursor on whichever specific display contains the target Y (or X) -- falling back to the nearest display if the target lands in a gap between stacked monitors.
+
 ## Requirements
 
 **Sender (Linux):**
@@ -95,6 +97,8 @@ receiver_host = "192.168.1.100"
 # receiver_hosts = ["192.168.1.100", "192.168.1.101"]
 receiver_port = 4242
 monitor = "DP-1"
+# or, for a crossover edge spanning multiple stacked monitors:
+# monitors = ["HDMI-A-1", "DP-1"]
 edge = "left"
 ```
 
@@ -103,8 +107,9 @@ edge = "left"
 | `receiver_host` | IP address of the Mac on the local network |
 | `receiver_hosts` | (optional) list of IP addresses to try in order, e.g. `["192.168.1.100", "192.168.1.101"]`. Use this when the Mac has multiple network interfaces (ethernet + wifi). At least one of `receiver_host` or `receiver_hosts` must be set. |
 | `receiver_port` | TCP port the receiver is listening on (default: 4242) |
-| `monitor` | Hyprland output name where the edge surface is placed (from `hyprctl monitors`) |
-| `edge` | Which side of the monitor triggers capture: `left`, `right`, `top`, `bottom` |
+| `monitor` | Hyprland output name where the edge surface is placed (from `hyprctl monitors`). Use this for a single-monitor crossover edge. |
+| `monitors` | (optional) list of Hyprland output names whose `edge` sides together form one virtual crossover edge, e.g. `["HDMI-A-1", "DP-1"]` for two stacked displays sharing a left edge. Exactly one of `monitor` or `monitors` must be set. |
+| `edge` | Which side of the monitor(s) triggers capture: `left`, `right`, `top`, `bottom`. Shared by every entry in `monitors`. |
 | `keyboard_device` | (optional) evdev device path. If omitted, auto-detects the first keyboard in `/dev/input/by-id/` |
 
 **Receiver (macOS):**

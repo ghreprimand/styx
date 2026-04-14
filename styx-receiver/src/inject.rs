@@ -38,6 +38,7 @@ pub struct Injector {
     button_state: ButtonState,
     cursor_pos: CGPoint,
     display_bounds: DisplayBounds,
+    edge_displays: Vec<DisplayBounds>,
     edge_span: EdgeSpan,
     return_edge: Edge,
     swap_alt_cmd: bool,
@@ -109,10 +110,12 @@ impl Injector {
             .map_err(|_| "failed to create CGEventSource")?;
 
         let bounds = compute_display_bounds();
-        let edge_span = compute_edge_span(return_edge);
+        let edge_displays = compute_edge_displays(return_edge);
+        let edge_span = span_of_displays(&edge_displays, return_edge);
         log::info!(
-            "display bounds: x=[{}, {}] y=[{}, {}], edge span: [{}, {}]",
+            "display bounds: x=[{}, {}] y=[{}, {}], edge displays: {}, edge span: [{}, {}]",
             bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y,
+            edge_displays.len(),
             edge_span.min, edge_span.max
         );
         let mid = edge_span.min + 0.5 * (edge_span.max - edge_span.min);
@@ -133,6 +136,7 @@ impl Injector {
             },
             cursor_pos,
             display_bounds: bounds,
+            edge_displays,
             edge_span,
             return_edge,
             swap_alt_cmd,
@@ -164,11 +168,13 @@ impl Injector {
             }
         }
         self.display_bounds = compute_display_bounds();
-        self.edge_span = compute_edge_span(self.return_edge);
+        self.edge_displays = compute_edge_displays(self.return_edge);
+        self.edge_span = span_of_displays(&self.edge_displays, self.return_edge);
         log::info!(
-            "reinit: display bounds: x=[{}, {}] y=[{}, {}], edge span: [{}, {}]",
+            "reinit: display bounds: x=[{}, {}] y=[{}, {}], edge displays: {}, edge span: [{}, {}]",
             self.display_bounds.min_x, self.display_bounds.max_x,
             self.display_bounds.min_y, self.display_bounds.max_y,
+            self.edge_displays.len(),
             self.edge_span.min, self.edge_span.max
         );
     }
@@ -201,12 +207,23 @@ impl Injector {
             event.post(CGEventTapLocation::HID);
         }
 
-        match self.return_edge {
-            Edge::Right => new_x >= self.display_bounds.max_x - 1.0,
-            Edge::Left => new_x <= self.display_bounds.min_x,
-            Edge::Bottom => new_y >= self.display_bounds.max_y - 1.0,
-            Edge::Top => new_y <= self.display_bounds.min_y,
-        }
+        // Only treat the cursor as having hit the return edge if it is on
+        // one of the displays that owns that edge AND at that display's own
+        // outer boundary. This prevents a monitor that happens to be at the
+        // rightmost x (but that is not part of the return edge) from falsely
+        // triggering return, and lets either of multiple stacked edge
+        // displays send the return signal.
+        self.edge_displays.iter().any(|d| {
+            let inside = new_x >= d.min_x && new_x < d.max_x
+                && new_y >= d.min_y && new_y < d.max_y;
+            if !inside { return false; }
+            match self.return_edge {
+                Edge::Right => new_x >= d.max_x - 1.0,
+                Edge::Left => new_x <= d.min_x,
+                Edge::Bottom => new_y >= d.max_y - 1.0,
+                Edge::Top => new_y <= d.min_y,
+            }
+        })
     }
 
     pub fn inject_mouse_button(&mut self, button: u32, state: u8) {
@@ -352,18 +369,35 @@ impl Injector {
     }
 
     /// Place the cursor at the entry edge, at the given pixel distance from
-    /// the bottom of the edge monitor. Clamps to the edge span.
+    /// the bottom of the combined edge span. Clamps to the span and picks
+    /// the specific edge display that contains the target position (or the
+    /// nearest one if it falls in a gap between stacked displays).
     pub fn place_cursor_from_bottom(&mut self, from_bottom: f64) {
+        if self.edge_displays.is_empty() {
+            return;
+        }
         let pos = (self.edge_span.max - from_bottom).clamp(self.edge_span.min, self.edge_span.max);
-        let x = match self.return_edge {
-            Edge::Right => self.display_bounds.max_x - 2.0,
-            Edge::Left => self.display_bounds.min_x + 2.0,
-            Edge::Top | Edge::Bottom => pos,
-        };
-        let y = match self.return_edge {
-            Edge::Left | Edge::Right => pos,
-            Edge::Bottom => self.display_bounds.max_y - 2.0,
-            Edge::Top => self.display_bounds.min_y + 2.0,
+        let target = self.edge_displays.iter().find(|d| {
+            match self.return_edge {
+                Edge::Left | Edge::Right => pos >= d.min_y && pos < d.max_y,
+                Edge::Top | Edge::Bottom => pos >= d.min_x && pos < d.max_x,
+            }
+        }).or_else(|| self.edge_displays.iter().min_by(|a, b| {
+            let ma = match self.return_edge {
+                Edge::Left | Edge::Right => (a.min_y + a.max_y) * 0.5,
+                Edge::Top | Edge::Bottom => (a.min_x + a.max_x) * 0.5,
+            };
+            let mb = match self.return_edge {
+                Edge::Left | Edge::Right => (b.min_y + b.max_y) * 0.5,
+                Edge::Top | Edge::Bottom => (b.min_x + b.max_x) * 0.5,
+            };
+            (ma - pos).abs().partial_cmp(&(mb - pos).abs()).unwrap()
+        })).unwrap();
+        let (x, y) = match self.return_edge {
+            Edge::Right => (target.max_x - 2.0, pos.clamp(target.min_y, target.max_y - 1.0)),
+            Edge::Left  => (target.min_x + 2.0, pos.clamp(target.min_y, target.max_y - 1.0)),
+            Edge::Bottom => (pos.clamp(target.min_x, target.max_x - 1.0), target.max_y - 2.0),
+            Edge::Top    => (pos.clamp(target.min_x, target.max_x - 1.0), target.min_y + 2.0),
         };
         self.cursor_pos = CGPoint::new(x, y);
     }
@@ -381,30 +415,69 @@ impl Injector {
     }
 }
 
-/// Find the monitor that owns the return edge and return its span along
-/// the perpendicular axis. For a left/right edge this is the Y range of
-/// the rightmost/leftmost monitor.
-fn compute_edge_span(return_edge: Edge) -> EdgeSpan {
-    if let Ok(displays) = CGDisplay::active_displays() {
-        let mut best: Option<(f64, f64, f64)> = None; // (edge_coord, span_min, span_max)
-        for id in displays {
-            let display = CGDisplay::new(id);
-            let b = display.bounds();
-            let (edge_coord, span_min, span_max) = match return_edge {
-                Edge::Right => (b.origin.x + b.size.width, b.origin.y, b.origin.y + b.size.height),
-                Edge::Left => (-b.origin.x, b.origin.y, b.origin.y + b.size.height),
-                Edge::Bottom => (b.origin.y + b.size.height, b.origin.x, b.origin.x + b.size.width),
-                Edge::Top => (-b.origin.y, b.origin.x, b.origin.x + b.size.width),
-            };
-            if best.is_none() || edge_coord > best.unwrap().0 {
-                best = Some((edge_coord, span_min, span_max));
-            }
-        }
-        if let Some((_, min, max)) = best {
-            return EdgeSpan { min, max };
-        }
+/// How close two monitor edges must be (in points) to count as occupying
+/// the same return-edge column. Handles displays whose outer edges do not
+/// line up exactly -- e.g. a portrait monitor stacked above a laptop
+/// display where both face the sender on their right side.
+const EDGE_ALIGN_TOLERANCE: f64 = 64.0;
+
+/// Return the bounds of every active display that sits at the return
+/// edge. For `Edge::Right` that is every display whose right edge is
+/// within `EDGE_ALIGN_TOLERANCE` of the overall rightmost x; analogously
+/// for the other edges.
+fn compute_edge_displays(return_edge: Edge) -> Vec<DisplayBounds> {
+    let Ok(ids) = CGDisplay::active_displays() else {
+        return Vec::new();
+    };
+    let mut all: Vec<DisplayBounds> = Vec::new();
+    for id in ids {
+        let b = CGDisplay::new(id).bounds();
+        all.push(DisplayBounds {
+            min_x: b.origin.x,
+            min_y: b.origin.y,
+            max_x: b.origin.x + b.size.width,
+            max_y: b.origin.y + b.size.height,
+        });
     }
-    EdgeSpan { min: 0.0, max: 1080.0 }
+    if all.is_empty() {
+        return all;
+    }
+    let extreme = match return_edge {
+        Edge::Right => all.iter().map(|d| d.max_x).fold(f64::MIN, f64::max),
+        Edge::Left => all.iter().map(|d| d.min_x).fold(f64::MAX, f64::min),
+        Edge::Bottom => all.iter().map(|d| d.max_y).fold(f64::MIN, f64::max),
+        Edge::Top => all.iter().map(|d| d.min_y).fold(f64::MAX, f64::min),
+    };
+    all.into_iter()
+        .filter(|d| {
+            let own = match return_edge {
+                Edge::Right => d.max_x,
+                Edge::Left => d.min_x,
+                Edge::Bottom => d.max_y,
+                Edge::Top => d.min_y,
+            };
+            (own - extreme).abs() <= EDGE_ALIGN_TOLERANCE
+        })
+        .collect()
+}
+
+/// Union the Y span (left/right edges) or X span (top/bottom edges) over
+/// a set of edge-owning displays.
+fn span_of_displays(displays: &[DisplayBounds], return_edge: Edge) -> EdgeSpan {
+    if displays.is_empty() {
+        return EdgeSpan { min: 0.0, max: 1080.0 };
+    }
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    for d in displays {
+        let (a, b) = match return_edge {
+            Edge::Left | Edge::Right => (d.min_y, d.max_y),
+            Edge::Top | Edge::Bottom => (d.min_x, d.max_x),
+        };
+        if a < min { min = a; }
+        if b > max { max = b; }
+    }
+    EdgeSpan { min, max }
 }
 
 fn compute_display_bounds() -> DisplayBounds {

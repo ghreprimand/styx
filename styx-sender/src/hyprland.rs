@@ -18,6 +18,7 @@ struct Monitor {
 pub struct MonitorGeometry {
     pub x: i32,
     pub y: i32,
+    pub width: i32,
     pub height: i32,
 }
 
@@ -48,16 +49,18 @@ pub async fn get_monitor(name: &str) -> Result<MonitorGeometry, Box<dyn std::err
     // Swap for 90° (1) and 270° (3) transforms, then divide by scale so
     // the result matches the logical coordinates used by movecursor and
     // by the Wayland layer surface.
-    let native_h = if mon.transform == 1 || mon.transform == 3 {
-        mon.width
+    let (native_w, native_h) = if mon.transform == 1 || mon.transform == 3 {
+        (mon.height, mon.width)
     } else {
-        mon.height
+        (mon.width, mon.height)
     };
     let scale = if mon.scale > 0.0 { mon.scale } else { 1.0 };
+    let w = (native_w as f64 / scale).round() as i32;
     let h = (native_h as f64 / scale).round() as i32;
     Ok(MonitorGeometry {
         x: mon.x,
         y: mon.y,
+        width: w,
         height: h,
     })
 }

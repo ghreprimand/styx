@@ -41,7 +41,14 @@ struct SenderConfig {
     #[serde(default)]
     receiver_hosts: Option<Vec<String>>,
     receiver_port: u16,
-    monitor: String,
+    /// Single monitor name (kept for backwards compatibility).
+    #[serde(default)]
+    monitor: Option<String>,
+    /// Multiple monitor names; the sender creates a layer surface on
+    /// each one's configured edge and treats the union as one virtual
+    /// edge for cursor mapping.
+    #[serde(default)]
+    monitors: Option<Vec<String>>,
     edge: String,
     #[serde(default)]
     keyboard_device: Option<String>,
@@ -128,12 +135,26 @@ fn detect_keyboard() -> Result<PathBuf, Box<dyn std::error::Error>> {
         .ok_or_else(|| "no keyboard found in /dev/input/by-id/; set keyboard_device in config".into())
 }
 
+fn resolve_monitors(cfg: &SenderConfig) -> Result<Vec<String>, String> {
+    if let Some(list) = &cfg.monitors {
+        if list.is_empty() {
+            return Err("`monitors` is empty; list at least one monitor".into());
+        }
+        return Ok(list.clone());
+    }
+    if let Some(m) = &cfg.monitor {
+        return Ok(vec![m.clone()]);
+    }
+    Err("config must set either `monitor` or `monitors` in [sender]".into())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let cli = Cli::parse();
     let config = load_config(&cli.config)?;
     let edge = parse_edge(&config.sender.edge)?;
+    let monitors = resolve_monitors(&config.sender)?;
 
     let kbd_path = match &config.sender.keyboard_device {
         Some(path) => PathBuf::from(path),
@@ -165,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<_, _>>()?;
 
     let mut transport = SenderTransport::new(addrs);
-    let mut wayland_capture = capture::Capture::new(&config.sender.monitor, edge)?;
+    let mut wayland_capture = capture::Capture::new(&monitors, edge)?;
     let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
     let mut async_evdev = AsyncEvdev::new(&evdev_capture)?;
     let mut kbd_available = true;
@@ -181,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clean_exit = false;
 
     clipboard::check_tools();
-    log::info!("styx-sender running (monitor={}, edge={:?})", config.sender.monitor, edge);
+    log::info!("styx-sender running (monitors={:?}, edge={:?})", monitors, edge);
 
     // Outer loop: connect, run event loop, reconnect on failure.
     'outer: loop {
@@ -316,11 +337,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             log::info!("return signal received (from_bottom={from_bottom:.0})");
                             release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
 
-                            if let Ok(geom) = hyprland::get_monitor(&config.sender.monitor).await {
-                                let x = geom.x + 2;
-                                // Map the pixel distance from bottom to our monitor.
-                                let y = geom.y + geom.height - from_bottom.round() as i32;
-                                let y = y.clamp(geom.y, geom.y + geom.height - 1);
+                            let mut geoms: Vec<hyprland::MonitorGeometry> = Vec::new();
+                            for name in &monitors {
+                                if let Ok(g) = hyprland::get_monitor(name).await {
+                                    geoms.push(g);
+                                }
+                            }
+                            if !geoms.is_empty() {
+                                // Compute the combined Y span across all configured monitors
+                                // and map from_bottom to a global Y, then find the monitor
+                                // whose Y range contains that point (clamping to the nearest
+                                // if the target falls in a gap).
+                                let combined_bottom = geoms.iter().map(|g| g.y + g.height).max().unwrap();
+                                let target_y = combined_bottom - from_bottom.round() as i32;
+                                let target = geoms.iter()
+                                    .find(|g| target_y >= g.y && target_y < g.y + g.height)
+                                    .or_else(|| geoms.iter().min_by_key(|g| {
+                                        let mid = g.y + g.height / 2;
+                                        (mid - target_y).abs()
+                                    }))
+                                    .unwrap();
+                                let y = target_y.clamp(target.y, target.y + target.height - 1);
+                                let x = match edge {
+                                    capture::Edge::Left => target.x + 2,
+                                    capture::Edge::Right => target.x + target.width - 2,
+                                    capture::Edge::Top | capture::Edge::Bottom => target.x + target.width / 2,
+                                };
                                 let _ = hyprland::warp_cursor(x, y).await;
                             }
 

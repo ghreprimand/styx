@@ -101,6 +101,10 @@ struct Window {
     buffer: wl_buffer::WlBuffer,
     surface: WlSurface,
     layer_surface: ZwlrLayerSurfaceV1,
+    #[allow(dead_code)]
+    name: String,
+    position: (i32, i32),
+    size: (i32, i32),
 }
 
 impl Drop for Window {
@@ -117,7 +121,8 @@ struct State {
     pointer_lock: Option<ZwpLockedPointerV1>,
     rel_pointer: Option<ZwpRelativePointerV1>,
     shortcut_inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
-    window: Option<Arc<Window>>,
+    windows: Vec<Arc<Window>>,
+    active_window: Option<Arc<Window>>,
     focused: bool,
     g: Globals,
     wayland_fd: RawFd,
@@ -127,7 +132,6 @@ struct State {
     output_info: Vec<(WlOutput, OutputInfo)>,
     scroll_discrete_pending: bool,
     edge: Edge,
-    monitor_size: (i32, i32),
     max_from_bottom: Option<f64>,
 }
 
@@ -147,7 +151,11 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn new(monitor: &str, edge: Edge) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(monitors: &[String], edge: Edge) -> Result<Self, Box<dyn std::error::Error>> {
+        if monitors.is_empty() {
+            return Err("no monitors configured for capture".into());
+        }
+
         let conn = Connection::connect_to_env()?;
         let (g, mut queue) = registry_queue_init::<State>(&conn)?;
         let qh = queue.handle();
@@ -187,7 +195,8 @@ impl Capture {
             pointer_lock: None,
             rel_pointer: None,
             shortcut_inhibitor: None,
-            window: None,
+            windows: Vec::new(),
+            active_window: None,
             focused: false,
             qh,
             wayland_fd,
@@ -196,7 +205,6 @@ impl Capture {
             output_info: vec![],
             scroll_discrete_pending: false,
             edge,
-            monitor_size: (0, 0),
             max_from_bottom: None,
         };
 
@@ -210,63 +218,81 @@ impl Capture {
         }
         queue.roundtrip(&mut state)?;
 
-        // Find the target monitor.
-        let (target_output, target_info) = state
-            .output_info
-            .iter()
-            .find(|(_, info)| info.name == monitor)
-            .ok_or_else(|| format!("monitor '{}' not found", monitor))?
-            .clone();
+        // Create an edge layer surface on each configured monitor.
+        for name in monitors {
+            let (target_output, target_info) = state
+                .output_info
+                .iter()
+                .find(|(_, info)| &info.name == name)
+                .ok_or_else(|| format!("monitor '{}' not found", name))?
+                .clone();
 
-        log::info!("target monitor: {} ({}x{})", target_info.name, target_info.size.0, target_info.size.1);
-        state.monitor_size = target_info.size;
+            log::info!(
+                "target monitor: {} ({}x{}) at ({},{})",
+                target_info.name,
+                target_info.size.0,
+                target_info.size.1,
+                target_info.position.0,
+                target_info.position.1,
+            );
 
-        // Create the edge surface.
-        let (width, height) = match edge {
-            Edge::Left | Edge::Right => (1u32, target_info.size.1 as u32),
-            Edge::Top | Edge::Bottom => (target_info.size.0 as u32, 1u32),
-        };
+            let (width, height) = match edge {
+                Edge::Left | Edge::Right => (1u32, target_info.size.1 as u32),
+                Edge::Top | Edge::Bottom => (target_info.size.0 as u32, 1u32),
+            };
 
-        let mut file = tempfile::tempfile()?;
-        draw_surface(&mut file, width, height);
+            let mut file = tempfile::tempfile()?;
+            draw_surface(&mut file, width, height);
 
-        let pool = state.g.shm.create_pool(
-            file.as_fd(),
-            (width * height * 4) as i32,
-            &state.qh,
-            (),
+            let pool = state.g.shm.create_pool(
+                file.as_fd(),
+                (width * height * 4) as i32,
+                &state.qh,
+                (),
+            );
+            let buffer = pool.create_buffer(
+                0,
+                width as i32,
+                height as i32,
+                (width * 4) as i32,
+                wl_shm::Format::Argb8888,
+                &state.qh,
+                (),
+            );
+            let surface = state.g.compositor.create_surface(&state.qh, ());
+            let layer_surface = state.g.layer_shell.get_layer_surface(
+                &surface,
+                Some(&target_output),
+                Layer::Overlay,
+                "styx".into(),
+                &state.qh,
+                (),
+            );
+
+            layer_surface.set_anchor(edge.anchor());
+            layer_surface.set_size(width, height);
+            layer_surface.set_exclusive_zone(-1);
+            layer_surface.set_margin(0, 0, 0, 0);
+            surface.set_input_region(None);
+            surface.commit();
+
+            state.windows.push(Arc::new(Window {
+                buffer,
+                surface,
+                layer_surface,
+                name: target_info.name.clone(),
+                position: target_info.position,
+                size: target_info.size,
+            }));
+        }
+
+        let (span_min, span_max) = combined_span(&state.windows, edge);
+        log::info!(
+            "combined edge span: [{}, {}] (height {})",
+            span_min,
+            span_max,
+            span_max - span_min,
         );
-        let buffer = pool.create_buffer(
-            0,
-            width as i32,
-            height as i32,
-            (width * 4) as i32,
-            wl_shm::Format::Argb8888,
-            &state.qh,
-            (),
-        );
-        let surface = state.g.compositor.create_surface(&state.qh, ());
-        let layer_surface = state.g.layer_shell.get_layer_surface(
-            &surface,
-            Some(&target_output),
-            Layer::Overlay,
-            "styx".into(),
-            &state.qh,
-            (),
-        );
-
-        layer_surface.set_anchor(edge.anchor());
-        layer_surface.set_size(width, height);
-        layer_surface.set_exclusive_zone(-1);
-        layer_surface.set_margin(0, 0, 0, 0);
-        surface.set_input_region(None);
-        surface.commit();
-
-        state.window = Some(Arc::new(Window {
-            buffer,
-            surface,
-            layer_surface,
-        }));
 
         queue.flush()?;
 
@@ -352,17 +378,19 @@ fn draw_surface(f: &mut File, width: u32, height: u32) {
 // -- State methods --
 
 impl State {
-    fn grab(&mut self, surface: &WlSurface, pointer: &WlPointer, serial: u32) {
+    fn find_window(&self, surface: &WlSurface) -> Option<Arc<Window>> {
+        self.windows.iter().find(|w| &w.surface == surface).cloned()
+    }
+
+    fn grab(&mut self, window: Arc<Window>, pointer: &WlPointer, serial: u32) {
         pointer.set_cursor(serial, None, 0, 0);
 
-        if let Some(window) = &self.window {
-            window.layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-            window.surface.commit();
-        }
+        window.layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        window.surface.commit();
 
         if self.pointer_lock.is_none() {
             self.pointer_lock = Some(self.g.pointer_constraints.lock_pointer(
-                surface,
+                &window.surface,
                 pointer,
                 None,
                 Lifetime::Persistent,
@@ -380,15 +408,16 @@ impl State {
         if let Some(manager) = &self.g.shortcut_inhibit_manager {
             if self.shortcut_inhibitor.is_none() {
                 self.shortcut_inhibitor =
-                    Some(manager.inhibit_shortcuts(surface, &self.g.seat, &self.qh, ()));
+                    Some(manager.inhibit_shortcuts(&window.surface, &self.g.seat, &self.qh, ()));
             }
         }
 
+        self.active_window = Some(window);
         self.focused = true;
     }
 
     fn ungrab(&mut self) {
-        if let Some(window) = &self.window {
+        if let Some(window) = self.active_window.take() {
             window.layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
             window.surface.commit();
         }
@@ -405,6 +434,29 @@ impl State {
 
         self.focused = false;
     }
+}
+
+/// Compute the union span (min, max) along the axis perpendicular to the edge
+/// across all configured windows. For left/right edges this is the Y span;
+/// for top/bottom it is the X span. All values are in logical coordinates.
+fn combined_span(windows: &[Arc<Window>], edge: Edge) -> (f64, f64) {
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+    for w in windows {
+        let (a, b) = match edge {
+            Edge::Left | Edge::Right => (
+                w.position.1 as f64,
+                (w.position.1 + w.size.1) as f64,
+            ),
+            Edge::Top | Edge::Bottom => (
+                w.position.0 as f64,
+                (w.position.0 + w.size.0) as f64,
+            ),
+        };
+        if a < min { min = a; }
+        if b > max { max = b; }
+    }
+    (min, max)
 }
 
 impl Inner {
@@ -499,27 +551,27 @@ impl Dispatch<WlPointer, ()> for State {
     ) {
         match event {
             wl_pointer::Event::Enter { serial, surface, surface_x, surface_y, .. } => {
-                if let Some(window) = &state.window {
-                    if window.surface == surface {
-                        let (from_bottom, source_height) = match state.edge {
-                            Edge::Left | Edge::Right => {
-                                let h = state.monitor_size.1 as f64;
-                                (h - surface_y, h)
-                            }
-                            Edge::Top | Edge::Bottom => {
-                                let w = state.monitor_size.0 as f64;
-                                (w - surface_x, w)
-                            }
-                        };
-                        // Block crossover above the receiver's screen height.
-                        if let Some(max) = state.max_from_bottom {
-                            if from_bottom > max {
-                                return;
-                            }
+                if let Some(window) = state.find_window(&surface) {
+                    let (span_min, span_max) = combined_span(&state.windows, state.edge);
+                    let source_height = span_max - span_min;
+                    let from_bottom = match state.edge {
+                        Edge::Left | Edge::Right => {
+                            let global_y = window.position.1 as f64 + surface_y;
+                            span_max - global_y
                         }
-                        state.grab(&surface, pointer, serial);
-                        state.pending_events.push_back(CaptureEvent::Begin { from_bottom, source_height });
+                        Edge::Top | Edge::Bottom => {
+                            let global_x = window.position.0 as f64 + surface_x;
+                            span_max - global_x
+                        }
+                    };
+                    // Block crossover above the receiver's screen height.
+                    if let Some(max) = state.max_from_bottom {
+                        if from_bottom > max {
+                            return;
+                        }
                     }
+                    state.grab(window, pointer, serial);
+                    state.pending_events.push_back(CaptureEvent::Begin { from_bottom, source_height });
                 }
             }
             wl_pointer::Event::Leave { .. } => {
@@ -617,12 +669,10 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = event {
-            if let Some(window) = &state.window {
-                if &window.layer_surface == layer_surface {
-                    window.surface.attach(Some(&window.buffer), 0, 0);
-                    layer_surface.ack_configure(serial);
-                    window.surface.commit();
-                }
+            if let Some(window) = state.windows.iter().find(|w| &w.layer_surface == layer_surface) {
+                window.surface.attach(Some(&window.buffer), 0, 0);
+                layer_surface.ack_configure(serial);
+                window.surface.commit();
             }
         }
     }
