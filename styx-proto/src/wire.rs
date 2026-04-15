@@ -14,6 +14,7 @@ const EVENT_HEARTBEAT: u8 = 0x30;
 const EVENT_HEARTBEAT_ACK: u8 = 0x31;
 const EVENT_CLIPBOARD_DATA: u8 = 0x40;
 const EVENT_CLIPBOARD_IMAGE: u8 = 0x41;
+const EVENT_CLIPBOARD_HTML: u8 = 0x42;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -35,6 +36,14 @@ pub enum Event {
     /// Binary image clipboard payload. `format` is a MIME type string
     /// (e.g. `image/png`). `data` is the encoded image bytes.
     ClipboardImage { format: String, data: Vec<u8> },
+    /// Rich-text clipboard payload. `html` is the `text/html`
+    /// representation; `plain` is the matching `text/plain` fallback
+    /// for targets that cannot render HTML. Either field may be empty
+    /// (a sender with plain-only content uses `ClipboardData`
+    /// instead; a sender with no plain fallback ships an empty plain).
+    /// Receivers that cannot set both MIME types simultaneously
+    /// (notably wl-copy on Linux) should prefer the plain text.
+    ClipboardHtml { html: String, plain: String },
 }
 
 impl Event {
@@ -52,6 +61,7 @@ impl Event {
             Event::HeartbeatAck => EVENT_HEARTBEAT_ACK,
             Event::ClipboardData { .. } => EVENT_CLIPBOARD_DATA,
             Event::ClipboardImage { .. } => EVENT_CLIPBOARD_IMAGE,
+            Event::ClipboardHtml { .. } => EVENT_CLIPBOARD_HTML,
         }
     }
 
@@ -64,6 +74,7 @@ impl Event {
             Event::CaptureBegin { .. } | Event::ReturnToSender { .. } => 16,
             Event::ClipboardData { text } => 4 + text.len(),
             Event::ClipboardImage { format, data } => 2 + format.len() + 4 + data.len(),
+            Event::ClipboardHtml { html, plain } => 4 + html.len() + 4 + plain.len(),
             _ => 0,
         }
     }
@@ -103,6 +114,15 @@ impl Event {
                 let data_len = data.len() as u32;
                 buf[fmt_end..fmt_end + 4].copy_from_slice(&data_len.to_be_bytes());
                 buf[fmt_end + 4..fmt_end + 4 + data.len()].copy_from_slice(data);
+            }
+            Event::ClipboardHtml { html, plain } => {
+                let html_len = html.len() as u32;
+                buf[0..4].copy_from_slice(&html_len.to_be_bytes());
+                let html_end = 4 + html.len();
+                buf[4..html_end].copy_from_slice(html.as_bytes());
+                let plain_len = plain.len() as u32;
+                buf[html_end..html_end + 4].copy_from_slice(&plain_len.to_be_bytes());
+                buf[html_end + 4..html_end + 4 + plain.len()].copy_from_slice(plain.as_bytes());
             }
             _ => {}
         }
@@ -196,6 +216,26 @@ impl Event {
                 }
                 let data = buf[fmt_end + 4..fmt_end + 4 + data_len].to_vec();
                 Ok(Event::ClipboardImage { format, data })
+            }
+            EVENT_CLIPBOARD_HTML => {
+                if buf.len() < 4 {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let html_len = u32::from_be_bytes(buf[0..4].try_into().unwrap()) as usize;
+                let html_end = 4 + html_len;
+                if buf.len() < html_end + 4 {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let html = String::from_utf8_lossy(&buf[4..html_end]).into_owned();
+                let plain_len = u32::from_be_bytes(
+                    buf[html_end..html_end + 4].try_into().unwrap(),
+                ) as usize;
+                if buf.len() < html_end + 4 + plain_len {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let plain = String::from_utf8_lossy(&buf[html_end + 4..html_end + 4 + plain_len])
+                    .into_owned();
+                Ok(Event::ClipboardHtml { html, plain })
             }
             _ => Err(DecodeError::UnknownEventType(type_byte)),
         }
@@ -398,6 +438,14 @@ mod tests {
             Event::ClipboardImage {
                 format: "image/png".to_string(),
                 data: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+            Event::ClipboardHtml {
+                html: "<b>bold</b>".to_string(),
+                plain: "bold".to_string(),
+            },
+            Event::ClipboardHtml {
+                html: "<i>no plain</i>".to_string(),
+                plain: String::new(),
             },
         ]
     }

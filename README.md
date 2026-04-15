@@ -30,9 +30,11 @@ The receiver tracks per-button click counts within a 500 ms interval so double- 
 
 TCP eliminates the stuck key problem entirely. Delivery is guaranteed by the kernel -- no dropped events, no acknowledgment protocol needed. For HID events on a LAN, the latency difference between TCP and UDP is imperceptible.
 
-Text and PNG image clipboard content is synced automatically. Copy on either machine, paste on either machine. Both sides prefer an image on the clipboard (MIME `image/png`) if one is present; otherwise plain text is sent. Images are capped at 32 MiB per transfer. Requires `wl-clipboard` (`wl-paste`/`wl-copy`) on the Linux side; macOS uses the built-in `pbcopy`/`pbpaste` for text and `NSPasteboardTypePNG` via AppKit for images.
+Plain text, rich text (HTML), and PNG image clipboard content is synced automatically. Copy on either machine, paste on either machine. Preference order on every read is image > HTML > plain text; if multiple representations are on the source pasteboard, the richest one wins. Images are capped at 32 MiB per transfer. TIFF images on the Mac pasteboard are transparently transcoded to PNG before hitting the wire. Requires `wl-clipboard` (`wl-paste`/`wl-copy`) on the Linux side; macOS uses the built-in `pbcopy`/`pbpaste` for text and AppKit's `NSPasteboard` directly for images and HTML.
 
-Linux-to-Mac clipboard sync fires on crossover into the Mac. Mac-to-Linux sync runs continuously: the receiver polls `NSPasteboard.changeCount` at 10 Hz and forwards new content to the sender as soon as it lands on the pasteboard, so by the time the user crosses back the content is already waiting on Linux. Both directions are deduplicated against a last-seen hash so the same content is never re-sent or echoed. Images and text never collide in the dedup because the hash includes a leading kind byte.
+Linux-to-Mac clipboard sync fires on crossover into the Mac. Mac-to-Linux sync runs continuously: the receiver polls `NSPasteboard.changeCount` at 10 Hz and forwards new content to the sender as soon as it lands on the pasteboard, so by the time the user crosses back the content is already waiting on Linux. Both directions are deduplicated against a last-seen hash so the same content is never re-sent or echoed. Text, image, and HTML hashes never collide because each is prefixed with a type-specific kind byte.
+
+Mac-to-Linux HTML degrades to plain text on write because `wl-copy` only accepts a single MIME type per invocation. The plain-text fallback that accompanies every `ClipboardHtml` event is what reaches Linux apps; see `docs/clipboard-sync.md` for the full asymmetry explanation.
 
 ```
 Linux (sender)                            Mac (receiver)
@@ -118,7 +120,12 @@ edge = "left"
 
 ```toml
 [receiver]
+# Either listen_host (single address) or listen_hosts (array) must be set:
 listen_host = "0.0.0.0"
+# Recommended for laptops that travel: bind only to DHCP-reserved home IPs.
+# Receiver exits cleanly when none of them match a live interface, so the
+# service does not expose itself on public networks.
+# listen_hosts = ["192.168.1.10", "192.168.1.11"]
 listen_port = 4242
 return_edge = "right"
 # swap_alt_cmd = true
@@ -126,10 +133,13 @@ return_edge = "right"
 
 | Option | Description |
 |--------|-------------|
-| `listen_host` | Address to bind (use `0.0.0.0` for all interfaces) |
+| `listen_host` | Address to bind (use `0.0.0.0` for all interfaces). Kept for backward compatibility with 0.3.x/0.4.x configs. |
+| `listen_hosts` | (recommended, 0.5.0+) List of addresses to bind. Receiver attempts each, binds every one that matches a live interface, and exits cleanly if none bind. Use this to restrict exposure to home networks only. |
 | `listen_port` | TCP port to listen on (required; 4242 is conventional and must match the sender's `receiver_port`) |
 | `return_edge` | Which display edge faces the Linux machine: `left`, `right`, `top`, `bottom` (default: `right`) |
 | `swap_alt_cmd` | (optional) Swap Alt and Super so physical key positions match the macOS Control/Option/Command layout (default: `false`) |
+
+See `docs/security.md` for the threat model behind `listen_hosts` and guidance on when to use it versus binding to `0.0.0.0`.
 
 ## Running
 
@@ -239,15 +249,22 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 - **Cancellation-safe frame reader.** The TCP frame reader accumulates bytes in a persistent buffer and only emits complete events, so the outer `tokio::select!` can cancel the recv future mid-frame (e.g. when a heartbeat tick fires during a large image transfer) without losing bytes or desynchronising the stream.
 - **Grab suppression during compositor contention.** If Hyprland starts pulling the pointer grab back from the sender in a rapid loop (possible when the Mac receiver is restarting and the user's cursor is parked on the edge surface), the sender arms an exponential-backoff cooldown (300 ms, 1 s, 5 s, 30 s) that silences the Wayland `Enter` handler so the compositor cannot drag the sender into a tight lock/unlock cycle. Prevents the input-starvation scenario where the keyboard appeared to drop events for ~10 seconds at a time.
 
+## Security
+
+Styx traffic is unencrypted plaintext TCP. On a trusted home LAN this is fine and is the intended deployment; on anything else, the threat model in `docs/security.md` describes the real risks (keystroke injection, clipboard exfiltration, passive sniffing) and the available mitigations (`listen_hosts` to bind only on known-home IPs, a VPN tunnel to encrypt everything on the wire).
+
+Short version: if the Mac travels, set `listen_hosts` to your home ethernet and wifi IPs and DHCP-reserve them on the router. The receiver binds only on those IPs and exits cleanly on networks without them, so it cannot be reached from public wifi.
+
 ## Scope and Limitations
 
 - Hyprland only. The sender depends on wlr-layer-shell and Hyprland's IPC socket. Other Wayland compositors that support wlr-layer-shell may work but are untested.
 - macOS only on the receiving end. The receiver uses Core Graphics APIs that are macOS-specific.
 - Input direction is Linux to Mac only. Clipboard flows both ways; mouse and keyboard do not.
-- No encryption. Use on a trusted network or behind a VPN.
+- No encryption. Use on a trusted network or behind a VPN. See `docs/security.md`.
 - Single sender, single receiver. No multi-machine mesh.
-- Clipboard image support is PNG only. TIFF, PDF, and other pasteboard formats macOS sometimes exposes are not read or written; the text fallback runs in those cases.
-- Clipboard transfers are capped at 32 MiB for images and roughly 64 KiB for text. Content exceeding the cap is silently dropped with a warning in the logs.
+- Clipboard image support is PNG on the wire. TIFF is transparently transcoded to PNG on the Mac side; PDF, WebP, HEIC, and other formats macOS sometimes exposes are not read or written. The text or HTML fallback runs in those cases.
+- Clipboard HTML from Mac to Linux degrades to plain text on write because `wl-copy` accepts a single MIME type per invocation. Rich text from Firefox/Chrome on Linux to Mac apps works fully; rich text from Safari on Mac to a Linux browser pastes as plain text.
+- Clipboard transfers are capped at 32 MiB for images, 1 MiB for text, and the same 32 MiB frame cap for HTML + plain combined. Content exceeding the cap is silently dropped with a warning in the logs.
 
 ## Project Structure
 
@@ -260,7 +277,8 @@ styx-sender/     Linux binary: layer-shell capture, evdev grab, Hyprland IPC,
 styx-receiver/   macOS binary: CGEvent injection, edge detection, TCP server,
                  NSPasteboard integration and changeCount poll
 dist/            PKGBUILD, systemd service, launchd plist, install scripts
-docs/            Long-form design notes (clipboard-sync, kvm-software)
+docs/            Long-form design notes: security model, wire protocol
+                 reference, clipboard sync, KVM history
 ```
 
 ## Wire Protocol
@@ -281,10 +299,15 @@ Every frame on the wire is `[u32 BE length][payload]`. The first byte of each pa
 | `0x0A` | `ReturnToSender` | `f64` from_bottom, `f64` source_height |
 | `0x40` | `ClipboardData` | `u32` len, UTF-8 bytes |
 | `0x41` | `ClipboardImage` | `u16` format_len, format UTF-8, `u32` data_len, image bytes |
+| `0x42` | `ClipboardHtml` | `u32` html_len, html UTF-8, `u32` plain_len, plain UTF-8 |
 
 Payloads are capped at 32 MiB (`MAX_FRAME_PAYLOAD` in `styx-proto/src/wire.rs`). Anything larger is dropped by the writer and rejected by the reader.
 
-**Breaking change in 0.4.0:** the frame length prefix was widened from `u16` to `u32` to accommodate image clipboard payloads. A 0.3.x sender cannot communicate with a 0.4.x receiver or vice versa; both sides must be upgraded together.
+See `docs/protocol.md` for a byte-level reference sufficient for implementing a compatible client in another language.
+
+**Compatibility:**
+- 0.3.x ↔ 0.4.x: incompatible (frame length prefix widened from `u16` to `u32`).
+- 0.4.x ↔ 0.5.x: plain text and images work; HTML clipboard sent from 0.5 to 0.4 causes the 0.4 peer to disconnect on the unknown `0x42` event. Upgrade both sides together for full 0.5 feature support.
 
 ## Acknowledgments
 

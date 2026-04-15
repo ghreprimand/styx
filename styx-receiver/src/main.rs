@@ -32,7 +32,20 @@ struct Config {
 
 #[derive(Deserialize)]
 struct ReceiverConfig {
-    listen_host: String,
+    /// Single host to bind to (backward-compatible). If set, merged
+    /// with `listen_hosts` when building the final bind list. The
+    /// receiver refuses to start if neither `listen_host` nor
+    /// `listen_hosts` is configured.
+    #[serde(default)]
+    listen_host: Option<String>,
+    /// List of hosts to bind to. Each is tried independently; the
+    /// receiver binds to every IP that resolves to a live local
+    /// interface and ignores the rest with a warning. Use this to
+    /// reserve multiple home-network IPs (ethernet + wifi) while
+    /// refusing to start on public networks where those IPs do not
+    /// exist.
+    #[serde(default)]
+    listen_hosts: Vec<String>,
     listen_port: u16,
     #[serde(default = "default_return_edge")]
     return_edge: String,
@@ -108,14 +121,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(&cli.config)?;
     let return_edge = parse_edge(&config.receiver.return_edge)?;
 
-    let addr: SocketAddr = format!(
-        "{}:{}",
-        config.receiver.listen_host, config.receiver.listen_port
-    )
-    .parse()?;
+    // Assemble the final bind list: listen_hosts takes precedence but
+    // listen_host is kept for backward compat with 0.4.x configs. At
+    // least one must be set.
+    let mut bind_hosts: Vec<String> = config.receiver.listen_hosts.clone();
+    if let Some(h) = &config.receiver.listen_host {
+        if !bind_hosts.iter().any(|x| x == h) {
+            bind_hosts.push(h.clone());
+        }
+    }
+    if bind_hosts.is_empty() {
+        return Err("receiver config: at least one of listen_host or listen_hosts must be set".into());
+    }
 
-    let listener = TcpListener::bind(addr).await?;
-    log::info!("listening on {addr}");
+    // Bind every host we can; warn on the rest. If nothing binds we
+    // exit cleanly -- that is the intended behaviour on networks
+    // without any of the configured home IPs (e.g. public wifi), so
+    // the receiver is not reachable when it should not be.
+    let port = config.receiver.listen_port;
+    let mut listeners: Vec<TcpListener> = Vec::new();
+    for host in &bind_hosts {
+        let addr: SocketAddr = match format!("{host}:{port}").parse() {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("invalid listen host '{host}:{port}': {e}");
+                continue;
+            }
+        };
+        match TcpListener::bind(addr).await {
+            Ok(l) => {
+                log::info!("listening on {addr}");
+                listeners.push(l);
+            }
+            Err(e) => log::warn!("failed to bind {addr}: {e}"),
+        }
+    }
+    if listeners.is_empty() {
+        return Err(format!(
+            "no configured listen hosts bound successfully ({} attempted); receiver not reachable on this network",
+            bind_hosts.len(),
+        )
+        .into());
+    }
+
+    // Fan all per-listener accept() loops into a single mpsc channel
+    // so the main loop can wait on connections from any of them
+    // uniformly. Capacity 4 is a small cushion for multiple listeners
+    // producing connections simultaneously; main drains quickly so
+    // this rarely fills.
+    let (accept_tx, mut accept_rx) =
+        tokio::sync::mpsc::channel::<(tokio::net::TcpStream, SocketAddr)>(4);
+    for listener in listeners {
+        let tx = accept_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok(pair) => {
+                        if tx.send(pair).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("accept error: {e}");
+                    }
+                }
+            }
+        });
+    }
+    drop(accept_tx);
 
     let mut transport = ReceiverTransport::new();
     let mut injector = Injector::new(return_edge, config.receiver.swap_alt_cmd)?;
@@ -146,14 +219,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     reinit_timer.tick().await; // consume the immediate first tick
 
     loop {
-        // Wait for a connection.
+        // Wait for a connection on any of the bound listeners.
         log::info!("waiting for connection...");
         let (stream, peer) = tokio::select! {
-            r = listener.accept() => match r {
-                Ok(conn) => conn,
-                Err(e) => {
-                    log::error!("accept error: {e}");
-                    continue;
+            maybe = accept_rx.recv() => match maybe {
+                Some(pair) => pair,
+                None => {
+                    log::error!("all accept tasks exited; no listeners remain");
+                    break;
                 }
             },
             _ = sigterm.recv() => break,
@@ -186,6 +259,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let h = match &event {
                         Event::ClipboardImage { format, data } => Some(clipboard::hash_image(format, data)),
                         Event::ClipboardData { text } => Some(clipboard::hash_text(text)),
+                        Event::ClipboardHtml { html, plain } => Some(clipboard::hash_html(html, plain)),
                         _ => None,
                     };
                     if let Some(h) = h {
@@ -195,6 +269,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Event::ClipboardImage { format, data } => log::info!(
                                     "proactive clipboard image to sender ({}, {} bytes)",
                                     format, data.len(),
+                                ),
+                                Event::ClipboardHtml { html, plain } => log::info!(
+                                    "proactive clipboard html to sender ({} html bytes, {} plain bytes)",
+                                    html.len(), plain.len(),
                                 ),
                                 Event::ClipboardData { text } => log::debug!(
                                     "proactive clipboard text to sender ({} bytes)",
@@ -207,17 +285,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     continue;
                 },
-                r = listener.accept() => match r {
-                    Ok((stream, peer)) => {
+                maybe = accept_rx.recv() => match maybe {
+                    Some((stream, peer)) => {
                         log::info!("new connection from {peer}, replacing existing");
                         injector.release_all_keys();
                         transport.disconnect();
                         transport.set_stream(stream);
                         continue;
                     }
-                    Err(e) => {
-                        log::error!("accept error: {e}");
-                        continue;
+                    None => {
+                        log::error!("all accept tasks exited; no listeners remain");
+                        break;
                     }
                 },
                 _ = reinit_timer.tick() => {
@@ -334,6 +412,20 @@ async fn handle_event(
             })
             .await;
         }
+        Event::ClipboardHtml { html, plain } => {
+            log::info!(
+                "received clipboard html from sender ({} html bytes, {} plain bytes)",
+                html.len(),
+                plain.len(),
+            );
+            *last_clip_hash = clipboard::hash_html(&html, &plain);
+            let h = html.clone();
+            let p = plain.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                clipboard_image::write_clipboard_html(&h, &p);
+            })
+            .await;
+        }
         Event::ReturnToSender { .. } | Event::HeartbeatAck => {}
     }
     false
@@ -373,17 +465,30 @@ async fn proactive_clipboard_poll(tx: tokio::sync::mpsc::Sender<Event>) {
         }
         last_change = current;
 
-        // Prefer image (same order as the previous edge-cross read).
+        // Preference order: image > html > plain text. Image is the
+        // heaviest-content type, html carries more context than plain,
+        // plain is the lowest-common-denominator fallback. Both image
+        // and html reads dedupe internally against their own hashes so
+        // we do not re-send when the pasteboard has the same content
+        // as a previous sync.
         let image = tokio::task::spawn_blocking(clipboard_image::read_clipboard_image)
             .await
             .ok()
             .flatten();
         let event = if let Some((format, data)) = image {
             Event::ClipboardImage { format, data }
-        } else if let Some(text) = clipboard::read_clipboard().await {
-            Event::ClipboardData { text }
         } else {
-            continue;
+            let html = tokio::task::spawn_blocking(clipboard_image::read_clipboard_html)
+                .await
+                .ok()
+                .flatten();
+            if let Some((html, plain)) = html {
+                Event::ClipboardHtml { html, plain }
+            } else if let Some(text) = clipboard::read_clipboard().await {
+                Event::ClipboardData { text }
+            } else {
+                continue;
+            }
         };
 
         // try_send: if the main loop has not drained the previous event
