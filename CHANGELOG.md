@@ -2,6 +2,16 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## 0.5.2 — 2026-04-15
+
+### Fixed
+
+- **Runaway `/tmp/styx-receiver.stderr.log` on networks without a matching `listen_hosts` IP.** When the receiver repeatedly exits because none of its configured bind addresses resolve to a live interface, launchd respawns it every 3 seconds, and each respawn logs a handful of lines that slowly accumulate to ~40 MB per day of continuous no-bind. On startup, the receiver now truncates this file if it exceeds 10 MiB and rebinds stderr via `dup2` to a fresh descriptor so new writes land contiguously rather than past the sparse gap that launchd's pre-opened descriptor would otherwise leave. Log is effectively bounded at 10 MiB permanently, regardless of how long the laptop stays on non-home networks.
+
+### Unchanged
+
+- Auto-reconnect behaviour. When the Mac returns to a network where `listen_hosts` matches a live interface, launchd's existing 3-second `ThrottleInterval` is preserved so the receiver comes back online within a few seconds of network change. No trade-off against responsiveness.
+
 ## 0.5.1 — 2026-04-15
 
 ### Added

@@ -108,8 +108,63 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
 /// No data for this long means the connection is dead.
 const RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Hard cap on the launchd-managed stderr log. If the receiver restarts
+/// while the file is larger than this, it gets truncated before the new
+/// process writes anything. Prevents runaway growth when the receiver
+/// is stuck in a respawn loop on networks where none of `listen_hosts`
+/// bind. 10 MiB is plenty of recent history for troubleshooting without
+/// accumulating hundreds of MiB across weeks of travel.
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Matches `StandardErrorPath` in `dist/macos/styx-receiver.plist`.
+/// Hard-coded because launchd does not expose this to the child process.
+const STDERR_LOG_PATH: &str = "/tmp/styx-receiver.stderr.log";
+
+/// Check the launchd-managed stderr log and, if it is larger than
+/// `MAX_LOG_SIZE`, truncate it and rebind stderr (fd 2) to a fresh
+/// write handle. The rebind matters: launchd has already dup'd its
+/// own open file descriptor onto our stderr, and that descriptor
+/// carries an offset that would cause subsequent writes to land
+/// past the truncation point, leaving a sparse gap. Opening the
+/// file ourselves and `dup2`-ing over fd 2 gives us a fresh offset
+/// so the new log is written contiguously from byte zero.
+///
+/// Best-effort: any failure (missing file, permission error) leaves
+/// launchd's original redirect in place and logging continues to
+/// work normally.
+fn cap_stderr_log() {
+    let truncate = match std::fs::metadata(STDERR_LOG_PATH) {
+        Ok(meta) => meta.len() > MAX_LOG_SIZE,
+        Err(_) => false,
+    };
+
+    let file = if truncate {
+        std::fs::File::create(STDERR_LOG_PATH).ok()
+    } else {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(STDERR_LOG_PATH)
+            .ok()
+    };
+
+    if let Some(f) = file {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: dup2 operates on two valid file descriptors; fd 2
+        // (stderr) is always valid in a process, and f.as_raw_fd()
+        // is valid for the lifetime of `f`.
+        unsafe {
+            libc::dup2(f.as_raw_fd(), 2);
+        }
+        // Leak `f` so Rust does not close the fd we just installed
+        // as stderr.
+        std::mem::forget(f);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    cap_stderr_log();
     env_logger::init();
 
     // Check Accessibility permission early so it's obvious in the logs.
