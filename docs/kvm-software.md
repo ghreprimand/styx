@@ -3,6 +3,12 @@
 Prior art, failed approaches, and design rationale for the styx project: a
 purpose-built software KVM for Hyprland and macOS.
 
+> **Status note (2026-04-15):** this document was written as an initial research and
+> design doc before any styx code was written. Styx has since shipped 0.1–0.5,
+> and this file is preserved as historical record. For current behaviour see
+> `README.md`, `docs/clipboard-sync.md`, `docs/security.md`, `docs/protocol.md`,
+> and `CHANGELOG.md`.
+
 ## Goal
 
 Share a Linux machine's physical keyboard and mouse with a Mac on the same
@@ -218,12 +224,18 @@ process restarts. The design must handle this gracefully:
 
 ### Future Enhancements
 
-- Clipboard sync (separate message type over same TCP connection)
-- TLS encryption (rustls on both sides)
-- Bidirectional support (Mac to Linux sharing)
-- Scroll wheel + trackpad gesture forwarding
-- systemd service for auto-start on Linux
-- launchd agent for auto-start on Mac
+Updated 2026-04-15 with actual shipping status:
+
+- [Shipped in 0.2] systemd service for auto-start on Linux (`dist/styx-sender.service`).
+- [Shipped in 0.2] launchd agent for auto-start on Mac (`dist/macos/install.sh`).
+- [Shipped in 0.2] Scroll wheel forwarding (`MouseScroll` event, both continuous and discrete axes).
+- [Shipped in 0.3] Clipboard text sync (`ClipboardData`, type `0x40`).
+- [Shipped in 0.4] Clipboard PNG image sync (`ClipboardImage`, type `0x41`, 32 MiB cap).
+- [Shipped in 0.5] Clipboard rich-text (HTML) sync (`ClipboardHtml`, type `0x42`).
+- [Shipped in 0.5] Network bind hardening via `listen_hosts` array so the receiver refuses to listen on untrusted networks.
+- [Pending] TLS encryption. Rationale still holds: `rustls` on both sides, no DTLS. Only worth shipping if users deploy styx on networks where the LAN itself is not trusted. See `docs/security.md` for what the current threat model covers and does not.
+- [Pending] Bidirectional input (Mac keyboard/mouse driving Linux). Covered as "essentially a second full project" in the release notes discussion — real work, not a tweak. Only worth pursuing with a concrete daily-use case that the physical KVM or per-machine keyboards do not cover.
+- [Pending] Trackpad gestures (pinch/zoom, rotate). Not in 0.5; the proto has no gesture event types. Would require a new event family plus a capture mechanism on Linux that the wayland-client crate does not directly expose today.
 
 ## Alternate Paths
 
