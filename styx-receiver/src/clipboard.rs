@@ -24,6 +24,17 @@ pub fn hash_image(format: &str, data: &[u8]) -> u64 {
     h.finish()
 }
 
+/// Hash for rich-text (HTML) clipboard content. Kind byte 2 keeps
+/// these hashes separate from text (0) and image (1) hashes so the
+/// dedup state is stable across type transitions.
+pub fn hash_html(html: &str, plain: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    2u8.hash(&mut h);
+    html.hash(&mut h);
+    plain.hash(&mut h);
+    h.finish()
+}
+
 pub async fn read_clipboard() -> Option<String> {
     let result = time::timeout(
         TIMEOUT,

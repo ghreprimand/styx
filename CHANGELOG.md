@@ -2,6 +2,30 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## 0.5.0 — unreleased
+
+### Added
+
+- **Rich-text clipboard (HTML)**. New wire event `ClipboardHtml { html, plain }` carries HTML content from the sender alongside a plain-text fallback. When copying rich text from Firefox or Chrome on Linux, the Mac receives both MIME types on `NSPasteboard` and rich-text targets (Mail, Pages, Notes) paste formatted output. Text-only targets (Terminal, Vim) still get clean plain text.
+- **TIFF → PNG transcoding on the Mac receiver.** If the pasteboard has `NSPasteboardTypeTIFF` but no PNG (e.g. some legacy image apps, or macOS screenshots in certain modes), the receiver now decodes the TIFF via `NSBitmapImageRep` and ships it as PNG. The Linux side never sees the TIFF; the wire format stays `image/png`. No protocol change from this feature.
+- **`listen_hosts` array in the receiver config.** Mirrors the sender's `receiver_hosts`. The receiver binds to every listed host that has a live local interface and exits cleanly if none do, so a laptop on an untrusted network (public wifi, someone else's LAN) refuses to listen at all. DHCP-reserve your home ethernet and wifi IPs and list both; the receiver binds on whichever interface is up. See `docs/security.md` for threat-model rationale.
+- **New document: `docs/security.md`.** Threat model, trust boundary, what styx protects and what it does not, hardening recipes.
+- **New document: `docs/protocol.md`.** Byte-level wire protocol reference covering framing, all event types, cancellation semantics, and versioning. Sufficient for implementing a compatible client in another language.
+
+### Changed
+
+- **Breaking:** a 0.4.x peer encountering a `ClipboardHtml` event (type byte `0x42`) treats it as unknown and disconnects. A 0.4.x sender never emits 0x42, so clipboard text and image interop between 0.4 and 0.5 continues to work for those types. Upgrade both sides together if you want HTML clipboard support.
+- The Mac receiver's proactive clipboard poll now reads HTML between the image path and the plain-text fallback: `Image > HTML > Plain`. On the Linux sender side, edge-cross clipboard send follows the same order.
+- `listen_host` (singular, 0.3.x+) continues to work and is merged with `listen_hosts` when both are set, so existing configs need no changes. If neither is set the receiver refuses to start.
+
+### Fixed
+
+- Pinned the homebrew formula's `sha256` to the real v0.4.0 tarball hash (was `"SKIP"`). Users installing via the formula now get integrity verification.
+
+### Requirements
+
+No new user-visible dependencies. The Mac receiver adds `NSBitmapImageRep`, `NSImageRep`, and `NSDictionary` to its `objc2-*` feature flags; these are compile-time and already linked as part of AppKit/Foundation.
+
 ## 0.4.0 — 2026-04-15
 
 ### Added

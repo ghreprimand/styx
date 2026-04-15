@@ -3,8 +3,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG};
-use objc2_foundation::{NSData, NSString};
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeHTML,
+    NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+};
+use objc2_foundation::{NSData, NSDictionary, NSString};
 
 /// MIME type styx transfers for image clipboard. Matches the sender side.
 pub const IMAGE_MIME: &str = "image/png";
@@ -18,6 +21,10 @@ pub const MAX_IMAGE_LEN: usize = 32 * 1024 * 1024 - 1024;
 /// we can defer to the text path. 0 is the sentinel for "none so far";
 /// a real PNG hashing to exactly 0 is a 1-in-2^64 collision we accept.
 static LAST_PNG_HASH: AtomicU64 = AtomicU64::new(0);
+
+/// Hash of the most recent HTML+plain pair we saw on (or wrote to)
+/// the pasteboard. Same echo-prevention role as `LAST_PNG_HASH`.
+static LAST_HTML_HASH: AtomicU64 = AtomicU64::new(0);
 
 fn hash_bytes(data: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
@@ -48,12 +55,21 @@ fn hash_bytes(data: &[u8]) -> u64 {
 pub fn read_clipboard_image() -> Option<(String, Vec<u8>)> {
     autoreleasepool(|_| {
         let pb = NSPasteboard::generalPasteboard();
-        // SAFETY: NSPasteboardTypePNG is a framework-declared extern
-        // static; non-null once AppKit is linked in (always, for this
-        // binary).
+        // SAFETY: NSPasteboardTypePNG/TIFF are framework-declared
+        // extern statics; non-null once AppKit is linked in (always,
+        // for this binary).
         let png_uti: &NSString = unsafe { NSPasteboardTypePNG };
-        let png_data = pb.dataForType(png_uti)?;
-        let bytes = png_data.to_vec();
+        let bytes = if let Some(png_data) = pb.dataForType(png_uti) {
+            png_data.to_vec()
+        } else {
+            // No PNG on the pasteboard. Some mac apps (older image
+            // editors, macOS screenshots in some modes) expose only
+            // TIFF; transcode to PNG so the linux side always gets
+            // the same format on the wire.
+            let tiff_uti: &NSString = unsafe { NSPasteboardTypeTIFF };
+            let tiff_data = pb.dataForType(tiff_uti)?;
+            tiff_to_png(&tiff_data.to_vec())?
+        };
         if bytes.is_empty() {
             return None;
         }
@@ -78,6 +94,29 @@ pub fn read_clipboard_image() -> Option<(String, Vec<u8>)> {
     })
 }
 
+/// Transcode a TIFF blob to PNG via `NSBitmapImageRep`. Returns `None`
+/// if AppKit cannot parse the input (e.g. truncated TIFF) or if the
+/// PNG encoder returns nothing. macOS's built-in TIFF decoder handles
+/// every TIFF subformat that real-world apps produce, so we rely on
+/// it rather than bundling a pure-Rust TIFF reader.
+fn tiff_to_png(tiff_bytes: &[u8]) -> Option<Vec<u8>> {
+    autoreleasepool(|_| {
+        let nsdata = NSData::with_bytes(tiff_bytes);
+        let rep = NSBitmapImageRep::imageRepWithData(&nsdata)?;
+        // objc2-app-kit 0.3's representationUsingType_properties takes
+        // &NSDictionary<NSString>, not the two-parameter form. Empty dict
+        // is enough for PNG -- no properties are required.
+        let props = NSDictionary::<NSString>::new();
+        // SAFETY: marked unsafe in objc2-app-kit 0.3.2 because the
+        // properties dict values are type-erased; we pass an empty dict
+        // which cannot violate any value-type constraint.
+        let png = unsafe {
+            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props)
+        }?;
+        Some(png.to_vec())
+    })
+}
+
 /// Current `NSPasteboard.changeCount`. Monotonic integer bumped by the
 /// pasteboard server on any mutation (`clearContents`,
 /// `setData:forType:`, `declareTypes:owner:`). Reading it is a cheap
@@ -85,6 +124,80 @@ pub fn read_clipboard_image() -> Option<(String, Vec<u8>)> {
 /// expensive `dataForType` read when the count changes.
 pub fn pasteboard_change_count() -> isize {
     autoreleasepool(|_| NSPasteboard::generalPasteboard().changeCount())
+}
+
+/// Read rich-text content from the macOS general pasteboard. Returns
+/// `Some((html, plain))` when `NSPasteboardTypeHTML` is present. If the
+/// pasteboard also has a plain-text representation (nearly always the
+/// case for content sourced from Safari, Mail, Pages, etc.), it is
+/// returned in the second tuple element; otherwise an empty string is
+/// returned and callers may choose to strip HTML tags themselves.
+/// Dedupes against `LAST_HTML_HASH` so a pasteboard we just wrote to
+/// does not get re-sent on the next poll tick.
+pub fn read_clipboard_html() -> Option<(String, String)> {
+    autoreleasepool(|_| {
+        let pb = NSPasteboard::generalPasteboard();
+        // SAFETY: NSPasteboardType* are framework-declared extern
+        // statics, non-null once AppKit is linked.
+        let html_uti: &NSString = unsafe { NSPasteboardTypeHTML };
+        let string_uti: &NSString = unsafe { NSPasteboardTypeString };
+
+        let html_data = pb.dataForType(html_uti)?;
+        let html_bytes = html_data.to_vec();
+        if html_bytes.is_empty() {
+            return None;
+        }
+        let html = String::from_utf8_lossy(&html_bytes).into_owned();
+
+        let plain = pb
+            .dataForType(string_uti)
+            .map(|d| String::from_utf8_lossy(&d.to_vec()).into_owned())
+            .unwrap_or_default();
+
+        let current_hash = hash_html_contents(&html, &plain);
+        let last_hash = LAST_HTML_HASH.load(Ordering::Relaxed);
+        if current_hash == last_hash {
+            return None;
+        }
+        LAST_HTML_HASH.store(current_hash, Ordering::Relaxed);
+        Some((html, plain))
+    })
+}
+
+/// Write `html` (as `NSPasteboardTypeHTML`) and `plain` (as
+/// `NSPasteboardTypeString`) to the macOS general pasteboard so rich
+/// paste targets get formatted content and plain-only targets still
+/// work. Updates `LAST_HTML_HASH` so a subsequent read on the same
+/// content is treated as a self-echo.
+pub fn write_clipboard_html(html: &str, plain: &str) {
+    if html.is_empty() {
+        return;
+    }
+    autoreleasepool(|_| {
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        // SAFETY: see note above.
+        let html_uti: &NSString = unsafe { NSPasteboardTypeHTML };
+        let string_uti: &NSString = unsafe { NSPasteboardTypeString };
+
+        let html_data = NSData::with_bytes(html.as_bytes());
+        pb.setData_forType(Some(&html_data), html_uti);
+
+        if !plain.is_empty() {
+            let plain_data = NSData::with_bytes(plain.as_bytes());
+            pb.setData_forType(Some(&plain_data), string_uti);
+        }
+
+        LAST_HTML_HASH.store(hash_html_contents(html, plain), Ordering::Relaxed);
+    });
+}
+
+fn hash_html_contents(html: &str, plain: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    2u8.hash(&mut h);
+    html.hash(&mut h);
+    plain.hash(&mut h);
+    h.finish()
 }
 
 /// Write a PNG blob to the macOS general pasteboard under `public.png`.

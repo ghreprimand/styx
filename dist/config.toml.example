@@ -27,7 +27,16 @@ miss_threshold = 3
 
 # Receiver configuration (macOS side).
 [receiver]
+# Single bind address:
 listen_host = "0.0.0.0"
+# Or restrict to specific home-network IPs (recommended for laptops
+# that sometimes join public networks). The receiver binds to every
+# listed host that has a live local interface and ignores the rest;
+# if none of them match a live interface, the receiver exits cleanly
+# without listening on anything. This keeps the service unreachable
+# on networks where styx has no business being. DHCP-reserve the
+# IPs on your home router so they are stable.
+# listen_hosts = ["192.168.1.10", "192.168.1.11"]
 listen_port = 4242
 
 # The edge of the Mac's display that faces the Linux machine. When the

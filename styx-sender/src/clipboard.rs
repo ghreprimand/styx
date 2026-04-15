@@ -57,6 +57,17 @@ pub fn hash_image(format: &str, data: &[u8]) -> u64 {
     h.finish()
 }
 
+/// Hash for rich-text (HTML) clipboard content. Kind byte 2 keeps
+/// these hashes separate from text (0) and image (1) hashes so the
+/// dedup state is stable across type transitions.
+pub fn hash_html(html: &str, plain: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    2u8.hash(&mut h);
+    html.hash(&mut h);
+    plain.hash(&mut h);
+    h.finish()
+}
+
 pub async fn read_clipboard() -> Option<String> {
     let result = time::timeout(
         TEXT_TIMEOUT,
@@ -118,6 +129,57 @@ async fn list_clipboard_types() -> Vec<String> {
             .filter(|s| !s.is_empty())
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// Read HTML and its plain-text fallback from the Wayland clipboard
+/// if rich-text content is present. Returns `None` if the clipboard
+/// does not offer `text/html`. When both types are available, both
+/// are pulled in one pass; when only HTML is available, the plain
+/// field is returned empty and the receiver is free to strip tags.
+pub async fn read_clipboard_html() -> Option<(String, String)> {
+    let types = list_clipboard_types().await;
+    if !types.iter().any(|t| t == "text/html") {
+        return None;
+    }
+
+    let html = read_clipboard_typed("text/html").await?;
+    if html.is_empty() {
+        return None;
+    }
+    let plain = read_clipboard_typed("text/plain").await.unwrap_or_default();
+    Some((html, plain))
+}
+
+/// Shell out to `wl-paste --type <mime>` and return the stdout as a
+/// UTF-8 string. Caps at `MAX_TEXT_LEN` to guard against pathological
+/// payloads; oversized content returns `None`.
+async fn read_clipboard_typed(mime: &str) -> Option<String> {
+    let result = time::timeout(
+        TEXT_TIMEOUT,
+        Command::new(WL_PASTE)
+            .args(["--no-newline", "--type", mime])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            if text.len() > MAX_TEXT_LEN {
+                log::warn!(
+                    "clipboard '{mime}' payload too large to sync: {} bytes (cap {} bytes)",
+                    text.len(),
+                    MAX_TEXT_LEN,
+                );
+                None
+            } else {
+                Some(text)
+            }
+        }
+        _ => None,
     }
 }
 

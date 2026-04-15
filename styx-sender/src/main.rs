@@ -279,14 +279,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = transport.send(&Event::CaptureBegin { from_bottom, source_height }).await;
                             log::info!("capture active");
 
-                            // Prefer image if one is on the clipboard; otherwise try
-                            // text. Only one clipboard event is sent per crossover.
+                            // Preference order image > html > plain.
+                            // Only one clipboard event is sent per crossover.
                             if let Some((format, data)) = clipboard::read_clipboard_image().await {
                                 let h = clipboard::hash_image(&format, &data);
                                 if h != last_clip_hash {
                                     last_clip_hash = h;
                                     log::info!("sent clipboard image ({}, {} bytes) to receiver", format, data.len());
                                     let _ = transport.send(&Event::ClipboardImage { format, data }).await;
+                                }
+                            } else if let Some((html, plain)) = clipboard::read_clipboard_html().await {
+                                let h = clipboard::hash_html(&html, &plain);
+                                if h != last_clip_hash {
+                                    last_clip_hash = h;
+                                    log::info!(
+                                        "sent clipboard html to receiver ({} html bytes, {} plain bytes)",
+                                        html.len(), plain.len(),
+                                    );
+                                    let _ = transport.send(&Event::ClipboardHtml { html, plain }).await;
                                 }
                             } else if let Some(text) = clipboard::read_clipboard().await {
                                 let h = clipboard::hash_text(&text);
@@ -444,6 +454,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             last_clip_hash = clipboard::hash_image(&format, &data);
                             clipboard::write_clipboard_image(&format, &data).await;
                         }
+                        Ok(Event::ClipboardHtml { html, plain }) => {
+                            // wl-copy only accepts a single MIME type per
+                            // invocation, so we write the plain-text
+                            // fallback and discard the html. Linux apps
+                            // overwhelmingly paste text/plain anyway.
+                            log::info!(
+                                "received clipboard html from receiver ({} html bytes, {} plain bytes); writing plain",
+                                html.len(), plain.len(),
+                            );
+                            last_clip_hash = clipboard::hash_html(&html, &plain);
+                            let to_write = if plain.is_empty() { strip_html_tags(&html) } else { plain };
+                            clipboard::write_clipboard(&to_write).await;
+                        }
                         Ok(_) => {}
                         Err(e) => {
                             log::error!("recv error: {e}");
@@ -520,4 +543,34 @@ async fn release_capture(
     let _ = evdev.ungrab();
     wayland.release();
     log::info!("capture ended");
+}
+
+/// Strip HTML tags and collapse whitespace, producing a best-effort
+/// plain-text rendering of an HTML fragment. Only used when the sender
+/// received a `ClipboardHtml` with an empty `plain` field and must
+/// still hand wl-copy something meaningful. Not a full HTML parser --
+/// deliberately simple: drop everything between `<` and `>`, decode
+/// the five XML entities, collapse runs of whitespace to a single
+/// space. Good enough for the typical "user copied a paragraph from a
+/// browser and wants to paste plain text into a terminal" case.
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    let decoded = out
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }

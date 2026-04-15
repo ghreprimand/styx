@@ -1,17 +1,17 @@
 # Clipboard Sync
 
-Reference for how styx 0.4.0 synchronises clipboard contents between the Linux sender and the macOS receiver. Covers both text and PNG images.
+Reference for how styx 0.5.0 synchronises clipboard contents between the Linux sender and the macOS receiver. Covers text, PNG images, and rich-text (HTML).
 
 ## Summary
 
-Text and PNG images copied on one machine become available for paste on the other over the existing TCP connection. Both directions work. Copy on either machine, paste on either machine.
+Text, rich text (HTML), and PNG images copied on one machine become available for paste on the other over the existing TCP connection. Both directions work. Copy on either machine, paste on either machine.
 
 Clipboard sync is deliberately scoped:
 
-- Text (UTF-8) and PNG images. No TIFF, PDF, HTML, RTF, or custom pasteboard types.
+- Text (UTF-8), HTML, and PNG images. TIFF on the Mac side is transparently transcoded to PNG before it reaches the wire. PDF, RTF, and custom pasteboard types are not handled.
 - One-way-at-a-time: whichever side produces content first wins the round. If both users copy something at the same time on different machines, the last-written content wins on both sides after the next sync event.
-- Images are capped at 32 MiB per transfer, text at roughly 64 KiB. Oversized content is dropped with a log warning.
-- Preference order on every read: image first, text second. If both are present on the source pasteboard, the image wins.
+- Images are capped at 32 MiB per transfer; text at 1 MiB; HTML + plain combined at the same 32 MiB frame cap. Oversized content is dropped with a log warning.
+- Preference order on every read: image > HTML > plain text. If multiple types are present on the source pasteboard, the richest one wins.
 
 ## Trigger Points
 
@@ -33,20 +33,26 @@ Because sync is continuous, the Linux clipboard is usually already populated by 
 
 ## Wire Protocol
 
-Two event types carry clipboard content:
+Three event types carry clipboard content:
 
 ```
 ClipboardData  (type 0x40): [u32 BE text_len][UTF-8 bytes]
 ClipboardImage (type 0x41): [u16 BE format_len][format UTF-8][u32 BE data_len][image bytes]
+ClipboardHtml  (type 0x42): [u32 BE html_len][html UTF-8][u32 BE plain_len][plain UTF-8]
 ```
 
 Wrapped in the standard frame: `[u32 BE frame_len][type byte][payload]`.
 
-`format` is always `image/png` for image content. The field exists so a future version can support additional formats without a protocol bump; readers today reject anything other than `image/png` with a log warning.
+`format` is always `image/png` for image content. The field exists so a future version can support additional image formats without a protocol bump; readers today reject anything other than `image/png` with a log warning.
+
+`ClipboardHtml` carries the HTML representation *and* a plain-text fallback. A sender is free to leave the plain field empty when no plain-text representation is available on the source pasteboard; receivers that cannot set both MIME types simultaneously (notably `wl-copy` on Linux) must prefer the plain field, falling back to tag-stripping the HTML if plain is empty.
 
 Payloads are capped at 32 MiB (`MAX_FRAME_PAYLOAD` in `styx-proto/src/wire.rs`, minus a small reserve for headers). The 32 MiB cap is shared across all event types, not per-event.
 
-The `u32` length prefix is a breaking change from 0.3.x, which used `u16` (64 KiB maximum frame). A 0.3.x peer cannot exchange frames with a 0.4.x peer; both sides must be upgraded together.
+Protocol compatibility:
+
+- 0.3.x used a `u16` frame length prefix and events `0x01`-`0x40`. 0.4.x+ uses `u32` and adds `ClipboardImage` (`0x41`). 0.3 ↔ 0.4 is incompatible.
+- 0.5.x adds `ClipboardHtml` (`0x42`). A 0.4.x reader encountering `0x42` disconnects with an unknown-event-type error; a 0.4.x sender never emits `0x42`. Image and plain-text clipboard interop between 0.4 and 0.5 continues to work; HTML content sent from 0.5 to 0.4 is lost. Upgrade both sides together for full support.
 
 ## Deduplication
 
@@ -56,8 +62,9 @@ The hash is computed with Rust's `DefaultHasher` over a leading kind byte plus t
 
 - `0x00 ++ text`
 - `0x01 ++ format ++ image_bytes`
+- `0x02 ++ html ++ plain`
 
-The kind byte ensures text and image hashes never collide, so the dedup state is stable even when the user rapidly alternates between text and image copies.
+The kind byte ensures text, image, and HTML hashes never collide, so the dedup state is stable even when the user rapidly alternates between types (e.g. copying a code snippet from Safari as rich text, then copying a file path as plain text, then copying a screenshot).
 
 ## macOS Lazy Pasteboard Providers
 
@@ -88,9 +95,16 @@ PNG reads and writes use `objc2-app-kit` and `objc2-foundation`:
 - Write: `NSPasteboard.clearContents()`, then `setData_forType(NSData::with_bytes(&bytes), NSPasteboardTypePNG)`.
 - Change detection: `NSPasteboard.changeCount()` returns `NSInteger` (`isize` in Rust).
 
+When no PNG is on the pasteboard but `NSPasteboardTypeTIFF` is present, the receiver loads the TIFF into `NSBitmapImageRep::imageRepWithData` and re-encodes it via `representationUsingType_properties(NSBitmapImageFileType::PNG, ...)`. The Linux side sees only PNG on the wire regardless of the source format.
+
+HTML reads and writes use two pasteboard types in one `autoreleasepool`:
+
+- Read: `dataForType(NSPasteboardTypeHTML)` for the HTML, `dataForType(NSPasteboardTypeString)` for the plain fallback. Both are UTF-8.
+- Write: after `clearContents()`, `setData_forType` is called for each of the two UTIs, so rich paste targets like Mail and Pages get formatted output while plain targets like Terminal still get clean text.
+
 All NSPasteboard calls happen on `tokio::task::spawn_blocking` to keep them off the async runtime's worker threads.
 
-Text reads and writes use `pbpaste` and `pbcopy` subprocesses — same pattern as the Linux side, but without the list-types probe (macOS does not expose that directly, and the PNG read serves as the image-presence probe).
+Text-only reads and writes use `pbpaste` and `pbcopy` subprocesses — same pattern as the Linux side, but without the list-types probe (macOS does not expose that directly, and the PNG and HTML reads serve as the image-presence and HTML-presence probes).
 
 ## Echo Prevention
 
@@ -122,9 +136,23 @@ Sequence when the user overwrites with fresh content on the mac:
 | `styx-receiver/src/clipboard_image.rs` | macOS image read/write via `NSPasteboard`, `changeCount` reader, `LAST_PNG_HASH` echo guard |
 | `styx-receiver/src/main.rs` | Proactive `proactive_clipboard_poll` task, inbound `ClipboardData`/`ClipboardImage` write |
 
+## Mac-to-Linux HTML asymmetry
+
+The Linux side writes clipboard content with `wl-copy`, which accepts exactly one MIME type per invocation. There is no native way to atomically publish text/html and text/plain simultaneously from a single wl-copy call.
+
+When the sender receives a `ClipboardHtml` event, it writes only the `plain` field via `wl-copy`. If `plain` is empty, it runs the HTML through a small tag-stripping heuristic (drop everything between `<` and `>`, decode `&amp;`/`&lt;`/`&gt;`/`&quot;`/`&apos;`/`&#39;`/`&nbsp;`, collapse whitespace) and writes that.
+
+Practical effect:
+
+- **Linux → Mac rich text**: works fully. wl-paste returns both `text/html` and `text/plain` when a browser puts rich text on the Wayland clipboard, the sender ships both, the Mac sets both on NSPasteboard, rich-paste targets on the Mac render the formatting.
+- **Mac → Linux rich text**: plain-text only. The Mac ships both html and plain; the Linux sender writes only the plain field. Users pasting on Linux get correct text content without formatting.
+
+If native multi-MIME write on Wayland becomes easier (for example via a `wl-clipboard` feature addition or a small styx-side persistent clipboard helper), the Mac → Linux direction can be upgraded without a protocol change.
+
 ## Out of Scope
 
-- TIFF, PDF, HTML, RTF, and other non-PNG image formats. Users copying from apps that only expose TIFF (for example, some legacy image editors) will see the text fallback instead of the image.
+- TIFF-only images survive via Mac-side transcoding but other non-PNG image formats (PDF, WebP, HEIC) are not read or written. Users copying from apps that only expose these formats will see the text fallback instead of the image.
+- RTF clipboard content. Most mac apps pair RTF with plain text on the pasteboard, so the plain-text fallback still carries the content — but the formatting is lost.
 - Clipboard history. Only the current contents are synced; there is no multi-item buffer.
-- Real-time streaming clipboards (e.g. `TEAK` or similar protocols). If the user changes the clipboard 15 times in a second on the Mac, the poll may coalesce those into one or two syncs; the latest content always wins.
-- Encryption. Clipboard content travels in plaintext over the same TCP connection as input events. Use on a trusted network or behind a VPN.
+- Real-time streaming clipboards. If the user changes the clipboard 15 times in a second on the Mac, the 10 Hz poll may coalesce those into one or two syncs; the latest content always wins.
+- Encryption. Clipboard content travels in plaintext over the same TCP connection as input events. See `docs/security.md` for the full threat model.
