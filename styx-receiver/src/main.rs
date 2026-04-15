@@ -46,6 +46,16 @@ struct ReceiverConfig {
     /// exist.
     #[serde(default)]
     listen_hosts: Vec<String>,
+    /// List of peer IP addresses permitted to connect. An empty list
+    /// disables the allowlist and every TCP connection that reaches a
+    /// bound port is accepted (legacy/default behaviour). When the
+    /// list is non-empty, connections from any peer not in the list
+    /// are closed immediately with a log line, before any bytes are
+    /// read. Use this alongside `listen_hosts` to defend against both
+    /// network-level exposure (listen_hosts) and LAN-local hostile
+    /// peers on networks where the receiver does bind (allowed_senders).
+    #[serde(default)]
+    allowed_senders: Vec<String>,
     listen_port: u16,
     #[serde(default = "default_return_edge")]
     return_edge: String,
@@ -164,6 +174,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    // Pre-parse allowed_senders into IpAddr values once at startup so
+    // the accept tasks do string parsing zero times per connection.
+    // Invalid entries produce a startup warning and are dropped.
+    let allowed_senders: Vec<std::net::IpAddr> = config
+        .receiver
+        .allowed_senders
+        .iter()
+        .filter_map(|s| match s.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(e) => {
+                log::warn!("invalid allowed_senders entry '{s}': {e}; ignoring");
+                None
+            }
+        })
+        .collect();
+    if allowed_senders.is_empty() && !config.receiver.allowed_senders.is_empty() {
+        return Err(
+            "allowed_senders is set but no entry parsed as a valid IP address; \
+             refusing to start rather than accepting every peer"
+                .into(),
+        );
+    }
+    if !allowed_senders.is_empty() {
+        log::info!(
+            "sender allowlist active: {} peer(s) permitted",
+            allowed_senders.len(),
+        );
+    } else {
+        log::info!("sender allowlist not configured; any peer that reaches a bound port will be accepted");
+    }
+
     // Fan all per-listener accept() loops into a single mpsc channel
     // so the main loop can wait on connections from any of them
     // uniformly. Capacity 4 is a small cushion for multiple listeners
@@ -173,11 +214,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::sync::mpsc::channel::<(tokio::net::TcpStream, SocketAddr)>(4);
     for listener in listeners {
         let tx = accept_tx.clone();
+        let allowlist = allowed_senders.clone();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok(pair) => {
-                        if tx.send(pair).await.is_err() {
+                    Ok((stream, peer)) => {
+                        if !allowlist.is_empty() && !allowlist.contains(&peer.ip()) {
+                            log::warn!(
+                                "rejected connection from {peer}: not in allowed_senders"
+                            );
+                            drop(stream);
+                            continue;
+                        }
+                        if tx.send((stream, peer)).await.is_err() {
                             return;
                         }
                     }

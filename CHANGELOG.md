@@ -2,7 +2,19 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
-## 0.5.0 — unreleased
+## 0.5.1 — 2026-04-15
+
+### Added
+
+- **`allowed_senders` array in receiver config.** Restricts which peer IPs are allowed to connect. The receiver accepts the TCP handshake (kernel-side, unavoidable once `listen` is called) but drops the connection immediately if the peer's IP is not on the list, before any styx events are read. Leaving the list empty preserves the previous accept-any behaviour.
+- Layered security model described in `docs/security.md`: `listen_hosts` controls bind surface; `allowed_senders` controls peer identity. Together they cover the realistic home-LAN threat model (public-wifi exposure, subnet-collision exposure, hostile-LAN peer) without requiring TLS.
+
+### Changed
+
+- No protocol change. 0.5.0 and 0.5.1 peers interoperate without modification.
+- README security section expanded to recommend both `listen_hosts` and `allowed_senders` as the default home-only hardening recipe.
+
+## 0.5.0 — 2026-04-15
 
 ### Added
 

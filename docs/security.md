@@ -9,13 +9,19 @@ Styx trusts the network segment that connects the sender (Linux) and the receive
 - Your home LAN (wired and wifi), behind a consumer router that blocks inbound traffic from the internet.
 - All devices on the LAN are presumed trusted (your own computers, phones, tablets, printers, IoT devices).
 
-Styx does not attempt to defend against:
+Styx's in-network-layer defenses (`listen_hosts`, `allowed_senders`) cover:
 
-- Other hosts on the same LAN that are hostile or compromised.
-- Network observers positioned between the sender and receiver (tap point on the router, compromised switch, someone running tcpdump on a broadcast/monitor port).
-- Processes running on the same host as the sender or receiver (they can already observe the keyboard and clipboard through normal OS APIs).
+- Complete absence of exposure on networks without any configured home IP (public wifi, coworking networks, hotels).
+- Hostile or compromised hosts on the same LAN that attempt to initiate a TCP connection to the receiver: rejected at accept time by source-IP allowlist.
+- The edge case of a foreign network coincidentally assigning your Mac one of its `listen_hosts` IPs: the receiver binds, but `allowed_senders` rejects every connection because no peer on that network has your sender's specific IP.
 
-If any of those threats are in scope for you, the mitigations are outside styx: segment the LAN (VLANs), tunnel styx inside a VPN (Tailscale, WireGuard), or do not run styx until you move to a trusted network.
+Styx does not defend against:
+
+- **Passive network observers** positioned between the sender and receiver (tap point on the router, compromised switch, someone running tcpdump on a broadcast/monitor port while you are actively typing or copying). All traffic is plaintext TCP. This is realistic on compromised wired LANs and far harder on wifi (WPA2/WPA3 encrypts the over-the-air segment); an attacker on the same open wifi would still be blocked from connecting by `allowed_senders` but could observe a legitimate session in flight.
+- **Processes running on the same host as the sender or receiver**: they can already observe the keyboard and clipboard through normal OS APIs.
+- **Active IP spoofing** on a switched LAN by a sophisticated attacker who can convince the switch to forward traffic addressed to your sender's IP to their own machine. Non-trivial on most home networks but theoretically possible.
+
+If any of those threats are in scope for you, the mitigation is TLS with client-cert auth (planned for 0.6.0) or tunneling styx inside a VPN (WireGuard, Tailscale) so the traffic is encrypted on the wire.
 
 ## What styx puts on the wire
 
@@ -41,9 +47,9 @@ On `0.0.0.0`, the receiver accepts a connection from any device that can reach t
 
 A passive observer on the LAN — without connecting — can still see every packet of an existing connection. All clipboard contents fly in plaintext.
 
-### Restricting the bind surface
+### Layer 1: `listen_hosts` (bind surface)
 
-The recommended hardening for laptops that sometimes join untrusted networks is to bind only to specific home-network IPs, using `listen_hosts` in the receiver config:
+Restrict which interfaces the receiver listens on. Added in 0.5.0.
 
 ```toml
 [receiver]
@@ -55,10 +61,35 @@ The receiver attempts to bind to every host in the list, logs warnings for the o
 
 - Reserve your Mac's ethernet and wifi IPs with DHCP on your home router so those addresses are stable.
 - List both in `listen_hosts`.
-- On your home network, at least one interface has one of those IPs and the receiver binds. The receiver is reachable only on those IPs; a device using a different IP on the same LAN cannot connect.
+- On your home network, at least one interface has one of those IPs and the receiver binds. The receiver is reachable only on those IPs.
 - On any other network (public wifi, hotspot, someone else's home), neither reservation matches the current DHCP lease. Every bind fails, the receiver exits cleanly, and there is nothing listening.
 
-This does not defend against hostile devices on your home LAN itself. It defends against hostile devices on networks styx was not designed for.
+What `listen_hosts` alone does not cover:
+
+- A hostile device on your own home LAN that can route packets to one of your `listen_hosts` IPs: it can connect and inject keystrokes or read the clipboard.
+- The residual case where a foreign network coincidentally uses the same subnet (`192.168.1.0/24` is common) and DHCP happens to assign you one of your listed IPs: the receiver binds and is exposed on that foreign network.
+
+### Layer 2: `allowed_senders` (peer allowlist)
+
+Restrict which peers are allowed to connect. Added in 0.5.1.
+
+```toml
+[receiver]
+listen_hosts = ["192.168.1.10", "192.168.1.11"]
+allowed_senders = ["192.168.1.12"]
+listen_port = 4242
+```
+
+The receiver accepts the TCP handshake from any peer (you cannot avoid that — the kernel does it automatically once `listen` is called), but immediately drops the connection if the peer's IP is not in `allowed_senders`, before any styx events are read. Connections from non-allowed peers see the TCP `SYN/ACK` go through and then a `RST` or `FIN` arrive, and get no further.
+
+With both layers configured:
+
+- Public wifi without any home IP on a live interface: receiver exits, nothing listens. Covered by `listen_hosts`.
+- Public wifi with coincidentally-matching IP on a live interface: receiver binds, but any attacker connecting has a different source IP than your sender and gets rejected. Covered by `allowed_senders`.
+- Home LAN with hostile peer (compromised IoT, guest laptop, neighbor on wifi): attacker tries to connect, source IP does not match, rejected. Covered by `allowed_senders`.
+- Home LAN with legitimate sender: matches both `listen_hosts` (for the bind) and `allowed_senders` (for the accept). Works normally.
+
+DHCP-reserve the sender's IP on your home router so the allowlist entry stays valid.
 
 ### Port scans
 
@@ -66,13 +97,22 @@ A port scanner on the same LAN will notice TCP/4242 open as long as the receiver
 
 ## Recommendations, ordered by how paranoid you want to be
 
-**Default home-only use.** `listen_host = "0.0.0.0"` is fine if your home LAN is trusted and the laptop never leaves it. No action needed.
+**Default home-only use.** `listen_host = "0.0.0.0"` is fine if your home LAN is small, trusted, and the laptop never leaves it. No action needed.
 
-**Laptop that travels.** Set `listen_hosts` to the Mac's home ethernet and wifi IPs (DHCP-reserved). Receiver exits cleanly on any other network. This is the recommended 0.5.0+ configuration for most users. See `docs/clipboard-sync.md` and the README config section.
+**Laptop that travels and home LAN you partially trust.** This is the recommended 0.5.1+ configuration for most users:
 
-**Distrust the home LAN.** Run styx inside a VPN tunnel (Tailscale, WireGuard). Set `listen_hosts` to the VPN interface's IP. The TCP port is only reachable through the tunnel. The tunnel encrypts everything on the wire, so both the injection risk and the passive-sniffing risk are eliminated for devices outside the VPN.
+```toml
+[receiver]
+listen_hosts = ["<mac-ethernet-ip>", "<mac-wifi-ip>"]
+allowed_senders = ["<sender-ip>"]
+listen_port = 4242
+```
 
-**Distrust everything on the LAN including VPN members.** Not yet supported. Planned for a future release via TLS with client-cert auth — see the roadmap in `docs/handoff-0.5.0.md` (or the corresponding file for the current release). If you need this today, tunnel styx over SSH: the `ssh -L` port-forward pattern terminates the TCP connection on each side and negotiates its own encryption.
+Receiver exits cleanly on any network where none of your `listen_hosts` IPs have a live interface, and rejects every peer except your sender on networks where they do. All three realistic threats (public-wifi exposure, subnet-collision exposure, hostile-LAN peer) are covered. Passive sniffing of legitimate sessions is still possible for someone with wire-tap access to your home LAN, but rarely a realistic threat in a home environment.
+
+**Distrust wire-level observers on your home LAN.** Tunnel styx inside a VPN (WireGuard). Set `listen_hosts` to the VPN interface's IP. The TCP port is only reachable through the tunnel; the tunnel encrypts everything on the wire. Combined with `allowed_senders` scoped to the sender's VPN-side IP, this defeats both injection and passive-sniffing.
+
+**Distrust everything on the LAN including VPN members.** Not yet supported natively. Planned for 0.6.0 via TLS with client-cert auth. If you need this today, tunnel styx over SSH: `ssh -L` port-forward terminates the TCP on each side and negotiates its own encryption.
 
 ## Reporting security issues
 
@@ -80,6 +120,7 @@ For problems that should not be discussed in public: open a GitHub security advi
 
 ## Release history relevant to security
 
+- **0.5.1**: Added `allowed_senders` array. The receiver rejects every TCP connection whose peer IP is not on the list, before any styx events are read. Closes the hostile-LAN-peer gap that `listen_hosts` alone did not cover.
 - **0.5.0**: Added `listen_hosts` array so the receiver can bind to specific home IPs and exit cleanly on networks without them.
 - **0.4.0**: Added the proactive clipboard poll. Clipboard contents now fly every ~100 ms while content changes rather than only at crossover. This increases what a passive observer sees if they are positioned to sniff the wire.
 - **0.3.0**: Added text clipboard sync. Until this release, no clipboard content was ever on the wire.

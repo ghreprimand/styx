@@ -37,6 +37,17 @@ listen_host = "0.0.0.0"
 # on networks where styx has no business being. DHCP-reserve the
 # IPs on your home router so they are stable.
 # listen_hosts = ["192.168.1.10", "192.168.1.11"]
+#
+# Restrict which peers can connect, by source IP. Recommended in
+# combination with listen_hosts: listen_hosts controls whether the
+# receiver listens at all on a given network; allowed_senders controls
+# who is allowed to talk to it when it does. Closes the gap where a
+# foreign network happens to assign you one of your listen_hosts IPs
+# and also closes the gap where a hostile device on your own home LAN
+# could otherwise inject keystrokes or read clipboard. DHCP-reserve
+# the sender's IP on your home router so it stays stable. If left
+# empty, every connection that reaches a bound port is accepted.
+# allowed_senders = ["192.168.1.12"]
 listen_port = 4242
 
 # The edge of the Mac's display that faces the Linux machine. When the

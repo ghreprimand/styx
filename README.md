@@ -126,6 +126,11 @@ listen_host = "0.0.0.0"
 # Receiver exits cleanly when none of them match a live interface, so the
 # service does not expose itself on public networks.
 # listen_hosts = ["192.168.1.10", "192.168.1.11"]
+# Restrict which peers can connect, by source IP. Rejects every other
+# peer at accept time, before any bytes are read. Combine with
+# listen_hosts for full coverage against both public-network exposure
+# and hostile peers on the home LAN.
+# allowed_senders = ["192.168.1.12"]
 listen_port = 4242
 return_edge = "right"
 # swap_alt_cmd = true
@@ -135,11 +140,12 @@ return_edge = "right"
 |--------|-------------|
 | `listen_host` | Address to bind (use `0.0.0.0` for all interfaces). Kept for backward compatibility with 0.3.x/0.4.x configs. |
 | `listen_hosts` | (recommended, 0.5.0+) List of addresses to bind. Receiver attempts each, binds every one that matches a live interface, and exits cleanly if none bind. Use this to restrict exposure to home networks only. |
+| `allowed_senders` | (recommended, 0.5.1+) List of peer IPs permitted to connect. Any connection whose peer IP is not on this list is rejected at accept time, before any styx events are read. Leave empty to accept every peer (legacy behaviour). |
 | `listen_port` | TCP port to listen on (required; 4242 is conventional and must match the sender's `receiver_port`) |
 | `return_edge` | Which display edge faces the Linux machine: `left`, `right`, `top`, `bottom` (default: `right`) |
 | `swap_alt_cmd` | (optional) Swap Alt and Super so physical key positions match the macOS Control/Option/Command layout (default: `false`) |
 
-See `docs/security.md` for the threat model behind `listen_hosts` and guidance on when to use it versus binding to `0.0.0.0`.
+See `docs/security.md` for the threat model behind `listen_hosts` + `allowed_senders` and which attacks each layer covers.
 
 ## Running
 
@@ -251,9 +257,12 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 
 ## Security
 
-Styx traffic is unencrypted plaintext TCP. On a trusted home LAN this is fine and is the intended deployment; on anything else, the threat model in `docs/security.md` describes the real risks (keystroke injection, clipboard exfiltration, passive sniffing) and the available mitigations (`listen_hosts` to bind only on known-home IPs, a VPN tunnel to encrypt everything on the wire).
+Styx traffic is unencrypted plaintext TCP. On a trusted home LAN this is fine and is the intended deployment; on anything else, the threat model in `docs/security.md` describes the real risks (keystroke injection, clipboard exfiltration, passive sniffing) and the two mitigations shipped in 0.5.x:
 
-Short version: if the Mac travels, set `listen_hosts` to your home ethernet and wifi IPs and DHCP-reserve them on the router. The receiver binds only on those IPs and exits cleanly on networks without them, so it cannot be reached from public wifi.
+- **`listen_hosts`**: bind only on configured home-network IPs. When the Mac is on a network where none of those IPs match a live interface, the receiver exits cleanly rather than listening. Defends against public-wifi exposure.
+- **`allowed_senders`**: reject connections from any peer whose IP is not on the allowlist. Defends against hostile devices on your own home LAN (compromised IoT, guest laptop, neighbor on your wifi) and against the edge case where a foreign network coincidentally assigns you one of your `listen_hosts` IPs.
+
+Short version: set both in the receiver config. The receiver binds only on listed home IPs and accepts connections only from your sender. A VPN tunnel on top is not required for home-only use; see `docs/security.md` for the full threat model and for guidance if you need protection against passive sniffing (TLS is planned for 0.6.0).
 
 ## Scope and Limitations
 
