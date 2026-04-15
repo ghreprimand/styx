@@ -1,6 +1,6 @@
 [package]
 name = "styx-receiver"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,6 +12,9 @@ styx-keymap = { path = "../styx-keymap" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time", "process"] }
 core-graphics = { version = "0.24", features = ["highsierra"] }
 core-foundation = "0.10"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 bitflags = "2"
 keycode = "0.4"
 log = "0.4"

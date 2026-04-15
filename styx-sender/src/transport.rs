@@ -5,23 +5,23 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time;
 
-use styx_proto::{self, Event, read_event, write_event};
+use styx_proto::{self, Event, FrameReader, write_event};
 
 pub struct SenderTransport {
-    stream: Option<TcpStream>,
+    reader: Option<FrameReader<TcpStream>>,
     addrs: Vec<SocketAddr>,
 }
 
 impl SenderTransport {
     pub fn new(addrs: Vec<SocketAddr>) -> Self {
         SenderTransport {
-            stream: None,
+            reader: None,
             addrs,
         }
     }
 
     pub fn is_connected(&self) -> bool {
-        self.stream.is_some()
+        self.reader.is_some()
     }
 
     pub async fn connect(&mut self) -> io::Result<()> {
@@ -37,7 +37,7 @@ impl SenderTransport {
                             .with_interval(Duration::from_secs(5));
                         let _ = sock.set_tcp_keepalive(&keepalive);
                         log::info!("connected to {addr}");
-                        self.stream = Some(stream);
+                        self.reader = Some(FrameReader::new(stream));
                         return Ok(());
                     }
                     Ok(Err(e)) => {
@@ -55,21 +55,21 @@ impl SenderTransport {
     }
 
     pub async fn send(&mut self, event: &Event) -> io::Result<()> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(reader) = self.reader.as_mut() else {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "not connected"));
         };
-        write_event(stream, event).await
+        write_event(reader.get_mut(), event).await
     }
 
     pub async fn recv(&mut self) -> Result<Event, styx_proto::DecodeError> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(reader) = self.reader.as_mut() else {
             return Err(styx_proto::DecodeError::ConnectionClosed);
         };
-        read_event(stream).await
+        reader.read_event().await
     }
 
     pub fn disconnect(&mut self) {
-        if self.stream.take().is_some() {
+        if self.reader.take().is_some() {
             log::info!("disconnected");
         }
     }

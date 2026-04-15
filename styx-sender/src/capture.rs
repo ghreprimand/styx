@@ -6,6 +6,7 @@ use std::{
     os::fd::{AsFd, AsRawFd, RawFd},
     sync::Arc,
     task::{Context, Poll, ready},
+    time::Instant,
 };
 
 use tokio::io::unix::AsyncFd;
@@ -133,6 +134,12 @@ struct State {
     scroll_discrete_pending: bool,
     edge: Edge,
     max_from_bottom: Option<f64>,
+    // When Some(deadline) and now < deadline, the Enter handler refuses
+    // to lock the pointer. Main arms this during force-release cooldown
+    // so the compositor can't drag us back into a Lock/Unlock loop while
+    // we are meant to be idle. Cleared lazily on the next Enter past the
+    // deadline. See `Capture::suppress_grab_until`.
+    grab_suppressed_until: Option<Instant>,
 }
 
 struct Inner {
@@ -206,6 +213,7 @@ impl Capture {
             scroll_discrete_pending: false,
             edge,
             max_from_bottom: None,
+            grab_suppressed_until: None,
         };
 
         // Read wl_output globals.
@@ -320,6 +328,22 @@ impl Capture {
         let inner = self.inner.get_mut();
         inner.state.ungrab();
         let _ = inner.flush_events();
+    }
+
+    /// Arm grab suppression until `deadline`. Until then, any pointer
+    /// Enter into an edge surface is ignored (no pointer lock taken, no
+    /// `Begin` event emitted). Used to damp the compositor force-release
+    /// loop: without this, each Enter/Leave cycle would re-lock the
+    /// pointer and re-emit Released events faster than the main loop
+    /// could drain them. Cleared lazily on the next Enter past the
+    /// deadline, so no timer is needed.
+    pub fn suppress_grab_until(&mut self, deadline: Instant) {
+        let state = &mut self.inner.get_mut().state;
+        // Drop any current grab so the compositor sees an immediately
+        // unlocked pointer; otherwise a pending Leave could still fire
+        // the "released pointer unexpectedly" warning once.
+        state.ungrab();
+        state.grab_suppressed_until = Some(deadline);
     }
 
     pub fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<CaptureEvent>> {
@@ -552,6 +576,16 @@ impl Dispatch<WlPointer, ()> for State {
         match event {
             wl_pointer::Event::Enter { serial, surface, surface_x, surface_y, .. } => {
                 if let Some(window) = state.find_window(&surface) {
+                    if let Some(deadline) = state.grab_suppressed_until {
+                        if Instant::now() < deadline {
+                            // Cooldown still active; refuse to lock.
+                            // Silently absorb the Enter so the
+                            // compositor-driven Enter/Leave thrash does
+                            // not spam warnings or enqueue events.
+                            return;
+                        }
+                        state.grab_suppressed_until = None;
+                    }
                     let (span_min, span_max) = combined_span(&state.windows, state.edge);
                     let source_height = span_max - span_min;
                     let from_bottom = match state.edge {

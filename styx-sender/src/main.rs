@@ -201,6 +201,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_clip_hash: u64 = 0;
     let mut clean_exit = false;
 
+    // Tracks rapid compositor force-release cycles so we can back off.
+    // Each time the compositor pulls our pointer grab while we were
+    // actively capturing, we arm return_cooldown so the next pointer
+    // Enter is ignored; if the releases keep happening in quick
+    // succession, the cooldown grows exponentially up to 30s to
+    // prevent the evdev keyboard grab from cycling hundreds of times
+    // per second and locking the user out of typing.
+    let mut force_release_streak: u32 = 0;
+    let mut force_release_last: Option<time::Instant> = None;
+
     clipboard::check_tools();
     log::info!("styx-sender running (monitors={:?}, edge={:?})", monitors, edge);
 
@@ -269,12 +279,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = transport.send(&Event::CaptureBegin { from_bottom, source_height }).await;
                             log::info!("capture active");
 
-                            if let Some(text) = clipboard::read_clipboard().await {
+                            // Prefer image if one is on the clipboard; otherwise try
+                            // text. Only one clipboard event is sent per crossover.
+                            if let Some((format, data)) = clipboard::read_clipboard_image().await {
+                                let h = clipboard::hash_image(&format, &data);
+                                if h != last_clip_hash {
+                                    last_clip_hash = h;
+                                    log::info!("sent clipboard image ({}, {} bytes) to receiver", format, data.len());
+                                    let _ = transport.send(&Event::ClipboardImage { format, data }).await;
+                                }
+                            } else if let Some(text) = clipboard::read_clipboard().await {
                                 let h = clipboard::hash_text(&text);
                                 if h != last_clip_hash {
                                     last_clip_hash = h;
                                     let _ = transport.send(&Event::ClipboardData { text }).await;
-                                    log::debug!("sent clipboard to receiver");
+                                    log::debug!("sent clipboard text to receiver");
                                 }
                             }
                         }
@@ -282,6 +301,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if capturing {
                                 log::warn!("compositor forced pointer release, ending capture");
                                 release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+
+                                let now = time::Instant::now();
+                                let close = force_release_last
+                                    .map(|t| now.duration_since(t) < Duration::from_secs(1))
+                                    .unwrap_or(false);
+                                force_release_streak = if close {
+                                    force_release_streak.saturating_add(1)
+                                } else {
+                                    1
+                                };
+                                force_release_last = Some(now);
+                                let cooldown_ms = match force_release_streak {
+                                    1 => 300,
+                                    2..=4 => 1_000,
+                                    5..=20 => 5_000,
+                                    _ => 30_000,
+                                };
+                                if force_release_streak >= 5 {
+                                    log::error!(
+                                        "pointer grab contention: {} force-releases in quick succession, backing off {} ms",
+                                        force_release_streak,
+                                        cooldown_ms,
+                                    );
+                                }
+                                return_cooldown = Some(now + Duration::from_millis(cooldown_ms));
+                                // Also silence the Wayland-side Enter
+                                // handler for the same window. Without
+                                // this, capture.rs keeps re-locking the
+                                // pointer on every compositor-driven
+                                // Enter, producing hundreds of
+                                // Leave-while-locked warnings per
+                                // second and starving input events.
+                                wayland_capture.suppress_grab_until(
+                                    std::time::Instant::now() + Duration::from_millis(cooldown_ms),
+                                );
                             }
                         }
                         CaptureEvent::Input(event) => {
@@ -377,8 +431,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             missed_heartbeats = 0;
                         }
                         Ok(Event::ClipboardData { text }) => {
-                            log::debug!("received clipboard from receiver");
+                            log::debug!("received clipboard text from receiver ({} bytes)", text.len());
+                            last_clip_hash = clipboard::hash_text(&text);
                             clipboard::write_clipboard(&text).await;
+                        }
+                        Ok(Event::ClipboardImage { format, data }) => {
+                            log::info!(
+                                "received clipboard image from receiver ({}, {} bytes)",
+                                format,
+                                data.len(),
+                            );
+                            last_clip_hash = clipboard::hash_image(&format, &data);
+                            clipboard::write_clipboard_image(&format, &data).await;
                         }
                         Ok(_) => {}
                         Err(e) => {

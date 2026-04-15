@@ -1,4 +1,5 @@
 mod clipboard;
+mod clipboard_image;
 mod edge;
 mod inject;
 mod transport;
@@ -126,6 +127,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sigint = signal(SignalKind::interrupt())?;
     let mut last_clip_hash: u64 = 0;
 
+    // Proactive clipboard sync: a background task polls
+    // NSPasteboard.changeCount at 10 Hz and forwards any new clipboard
+    // content over this channel. The main loop deduplicates against
+    // last_clip_hash and performs the transport.send so it remains the
+    // sole owner of both. Channel capacity 1: newer clipboard content
+    // supersedes any older item still in the queue; try_send drops on
+    // full, and the next tick re-reads if something was lost.
+    let (clip_tx, mut clip_rx) = tokio::sync::mpsc::channel::<Event>(1);
+    tokio::spawn(proactive_clipboard_poll(clip_tx));
+
     log::info!("styx-receiver running (return_edge={:?})", return_edge);
 
     // Periodically recreate the CGEventSource and recompute display bounds.
@@ -170,6 +181,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         log::warn!("recv timeout, connection dead");
                         break;
                     }
+                },
+                Some(event) = clip_rx.recv() => {
+                    let h = match &event {
+                        Event::ClipboardImage { format, data } => Some(clipboard::hash_image(format, data)),
+                        Event::ClipboardData { text } => Some(clipboard::hash_text(text)),
+                        _ => None,
+                    };
+                    if let Some(h) = h {
+                        if h != last_clip_hash {
+                            last_clip_hash = h;
+                            match &event {
+                                Event::ClipboardImage { format, data } => log::info!(
+                                    "proactive clipboard image to sender ({}, {} bytes)",
+                                    format, data.len(),
+                                ),
+                                Event::ClipboardData { text } => log::debug!(
+                                    "proactive clipboard text to sender ({} bytes)",
+                                    text.len(),
+                                ),
+                                _ => {}
+                            }
+                            let _ = transport.send(&event).await;
+                        }
+                    }
+                    continue;
                 },
                 r = listener.accept() => match r {
                     Ok((stream, peer)) => {
@@ -249,16 +285,10 @@ async fn handle_event(
                 let (from_bottom, source_height) = injector.cursor_from_bottom();
                 log::info!("cursor hit return edge (from_bottom={from_bottom:.0}, height={source_height:.0})");
                 injector.release_all_keys();
-
-                if let Some(text) = clipboard::read_clipboard().await {
-                    let h = clipboard::hash_text(&text);
-                    if h != *last_clip_hash {
-                        *last_clip_hash = h;
-                        let _ = transport.send(&Event::ClipboardData { text }).await;
-                        log::debug!("sent clipboard to sender");
-                    }
-                }
-
+                // Clipboard stays in sync via the proactive_clipboard_poll
+                // task, so no read happens here. This avoids the
+                // pasteboard-not-yet-settled race when the user hits
+                // Cmd+C and immediately crosses back.
                 let _ = transport.send(&Event::ReturnToSender { from_bottom, source_height }).await;
                 return true;
             }
@@ -287,10 +317,81 @@ async fn handle_event(
             let _ = transport.send(&Event::HeartbeatAck).await;
         }
         Event::ClipboardData { text } => {
-            log::debug!("received clipboard from sender");
+            log::debug!("received clipboard text from sender ({} bytes)", text.len());
+            *last_clip_hash = clipboard::hash_text(&text);
             clipboard::write_clipboard(&text).await;
+        }
+        Event::ClipboardImage { format, data } => {
+            log::info!(
+                "received clipboard image from sender ({}, {} bytes)",
+                format,
+                data.len(),
+            );
+            *last_clip_hash = clipboard::hash_image(&format, &data);
+            let fmt = format.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                clipboard_image::write_clipboard_image(&fmt, &data);
+            })
+            .await;
         }
         Event::ReturnToSender { .. } | Event::HeartbeatAck => {}
     }
     false
+}
+
+/// Polls `NSPasteboard.changeCount` at 10 Hz. On every bump, reads the
+/// clipboard (PNG image first, text via pbpaste as fallback) and
+/// forwards an `Event` on the channel so the main loop can dedup and
+/// transmit. Runs for the lifetime of the process; survives sender
+/// disconnects because the channel is bounded capacity 1 with
+/// try_send, so stale pending events are replaced by the latest.
+///
+/// Starts by reading the current changeCount and treating it as the
+/// baseline so existing pasteboard contents at startup are NOT
+/// re-synced; that avoids spamming the sender on every reconnect.
+async fn proactive_clipboard_poll(tx: tokio::sync::mpsc::Sender<Event>) {
+    let mut last_change: isize = tokio::task::spawn_blocking(clipboard_image::pasteboard_change_count)
+        .await
+        .unwrap_or(0);
+    let mut ticker = time::interval(Duration::from_millis(100));
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    // Consume the immediate first tick -- interval() fires immediately by default.
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+
+        let current = match tokio::task::spawn_blocking(clipboard_image::pasteboard_change_count).await {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("pasteboard_change_count join error: {e}");
+                continue;
+            }
+        };
+        if current == last_change {
+            continue;
+        }
+        last_change = current;
+
+        // Prefer image (same order as the previous edge-cross read).
+        let image = tokio::task::spawn_blocking(clipboard_image::read_clipboard_image)
+            .await
+            .ok()
+            .flatten();
+        let event = if let Some((format, data)) = image {
+            Event::ClipboardImage { format, data }
+        } else if let Some(text) = clipboard::read_clipboard().await {
+            Event::ClipboardData { text }
+        } else {
+            continue;
+        };
+
+        // try_send: if the main loop has not drained the previous event
+        // yet, drop this tick -- a later tick will catch up with
+        // whatever is on the pasteboard then.
+        if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = tx.try_send(event) {
+            // Main loop ended; nothing to do.
+            return;
+        }
+    }
 }

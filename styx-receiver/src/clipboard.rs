@@ -11,7 +11,16 @@ const MAX_TEXT_LEN: usize = 65530; // 65535 frame - 1 type byte - 4 byte text le
 
 pub fn hash_text(text: &str) -> u64 {
     let mut h = DefaultHasher::new();
+    0u8.hash(&mut h); // kind byte so image and text hashes never collide
     text.hash(&mut h);
+    h.finish()
+}
+
+pub fn hash_image(format: &str, data: &[u8]) -> u64 {
+    let mut h = DefaultHasher::new();
+    1u8.hash(&mut h);
+    format.hash(&mut h);
+    data.hash(&mut h);
     h.finish()
 }
 

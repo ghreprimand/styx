@@ -30,7 +30,9 @@ The receiver tracks per-button click counts within a 500 ms interval so double- 
 
 TCP eliminates the stuck key problem entirely. Delivery is guaranteed by the kernel -- no dropped events, no acknowledgment protocol needed. For HID events on a LAN, the latency difference between TCP and UDP is imperceptible.
 
-Text clipboard is synced automatically on each transition. When the cursor crosses from Linux to Mac, the Linux clipboard is pushed to macOS. When it returns, the macOS clipboard is pushed back. Copy on either machine, paste on either machine. Requires `wl-clipboard` (`wl-paste`/`wl-copy`) on the Linux side; macOS uses the built-in `pbcopy`/`pbpaste`.
+Text and PNG image clipboard content is synced automatically. Copy on either machine, paste on either machine. Both sides prefer an image on the clipboard (MIME `image/png`) if one is present; otherwise plain text is sent. Images are capped at 32 MiB per transfer. Requires `wl-clipboard` (`wl-paste`/`wl-copy`) on the Linux side; macOS uses the built-in `pbcopy`/`pbpaste` for text and `NSPasteboardTypePNG` via AppKit for images.
+
+Linux-to-Mac clipboard sync fires on crossover into the Mac. Mac-to-Linux sync runs continuously: the receiver polls `NSPasteboard.changeCount` at 10 Hz and forwards new content to the sender as soon as it lands on the pasteboard, so by the time the user crosses back the content is already waiting on Linux. Both directions are deduplicated against a last-seen hash so the same content is never re-sent or echoed. Images and text never collide in the dedup because the hash includes a leading kind byte.
 
 ```
 Linux (sender)                            Mac (receiver)
@@ -202,12 +204,13 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 - If you rebuilt the receiver, you may need to remove and re-add the Accessibility entry (especially with ad-hoc signing).
 
 **Receiver doesn't start on login:**
-- Verify the launchd agent is loaded: `launchctl print gui/$(id -u)/com.ghreprimand.styx-receiver`
+- Verify the launchd agent is loaded: `launchctl print gui/$(id -u)/com.styx.receiver` (the label may differ depending on how the plist was installed — check `~/Library/LaunchAgents/`).
 - Re-run `./dist/macos/install.sh` to reinstall.
 
 **Connection drops repeatedly:**
-- Both sides must be on the same protocol version. Rebuild and restart both sender and receiver after pulling updates.
+- Both sides must be on the same protocol version. Rebuild and restart both sender and receiver after pulling updates. 0.3.x and 0.4.x are wire-incompatible; upgrade both sides together.
 - Check for duplicate sender instances: `pgrep -c styx-sender` should return 1.
+- If you see `payload too large:` warnings in `journalctl --user -u styx-sender`, verify both sides are 0.4.0 or newer; 0.3.x used a 16-bit length prefix that 0.4.x misinterprets as the first half of a much larger frame.
 
 **Cursor position is wrong on portrait monitors:**
 - Styx accounts for Hyprland monitor transforms (90/270 rotation). If positions are still wrong, check that `hyprctl -j monitors` shows the correct `transform` value for your portrait monitor.
@@ -215,33 +218,73 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 **Keys trigger wrong shortcuts on Mac:**
 - By default, Linux Left Alt maps to macOS Option and Linux Super maps to macOS Command. Set `swap_alt_cmd = true` in the receiver config to swap these so the physical key positions match the standard macOS layout (Super becomes Option, Alt becomes Command).
 
+**Clipboard sync misses very recent copies:**
+- The macOS receiver polls `NSPasteboard.changeCount` at 10 Hz, so worst-case latency between Cmd+C and the content being available on Linux is about 100 ms. If you cross over faster than that, the clipboard from *before* the copy may paste on Linux. Wait a beat after Cmd+C.
+- The Linux-to-Mac direction fires on crossover, so Ctrl+C on Linux is synced the instant you hit the edge. No wait required.
+
+**Keyboard input drops for several seconds at a time:**
+- Check `journalctl --user -u styx-sender` for an `ERROR`-level line containing `pointer grab contention`. This indicates Hyprland and the sender are fighting over the pointer grab; the sender's exponential backoff limits how long this can persist (capped at 30 s per cycle) but does not prevent it. Usually triggered by the Mac receiver being down or restarting while the cursor is parked on the edge surface. Restart the receiver (or move the cursor away from the edge) to resolve.
+
 ## Design Decisions
 
 - **TCP, not UDP.** Eliminates stuck keys. TCP guarantees delivery and ordering. The sub-millisecond latency penalty on a LAN is imperceptible for HID events.
 - **evdev for keyboard, layer-shell for mouse.** The layer-shell surface detects when the cursor hits the edge. Keyboard capture uses evdev with an exclusive grab, which reads directly from the kernel and avoids the event delivery issues in lan-mouse's layer-shell keyboard forwarding.
 - **No encryption by default.** Both machines are on the same trusted network. TLS can be added later without the cross-platform pain of DTLS.
-- **Unidirectional.** The Linux machine is always the sender, the Mac is always the receiver. One connection, one direction, minimal state.
+- **Unidirectional input, bidirectional clipboard.** The Linux machine is always the sender for mouse and keyboard; the Mac is always the receiver. Clipboard content flows both ways over the same TCP connection.
 - **Adaptive heartbeat.** 1-second interval during active capture, 5-second interval when idle. Three missed heartbeats trigger disconnect and key release. Worst-case detection during active use is 3 seconds.
 - **Release all keys on disconnect.** Both sides track held keys and release everything immediately when the connection drops.
 - **Bottom-aligned cursor mapping.** Monitors of different heights are treated as bottom-aligned. The wire protocol sends the pixel distance from the bottom and the source monitor's height, so each side can map proportionally without needing to know the other's resolution in advance.
+- **Proactive clipboard sync on macOS.** The receiver polls `NSPasteboard.changeCount` at 10 Hz rather than reading the pasteboard only when the user crosses. `changeCount` is a monotonic integer the pasteboard server bumps on every mutation, so the poll is cheap when nothing has changed. Reading proactively means the Linux side already has the latest content by the time the cursor crosses, and avoids a race where the pasteboard has not yet settled (e.g. lazy text providers in terminals) when the edge-cross read fires.
+- **Image-first clipboard preference.** When both image and text are on the source clipboard, the image wins. Text is the fallback. This matches how macOS and most Linux apps present compound clipboards.
+- **Cancellation-safe frame reader.** The TCP frame reader accumulates bytes in a persistent buffer and only emits complete events, so the outer `tokio::select!` can cancel the recv future mid-frame (e.g. when a heartbeat tick fires during a large image transfer) without losing bytes or desynchronising the stream.
+- **Grab suppression during compositor contention.** If Hyprland starts pulling the pointer grab back from the sender in a rapid loop (possible when the Mac receiver is restarting and the user's cursor is parked on the edge surface), the sender arms an exponential-backoff cooldown (300 ms, 1 s, 5 s, 30 s) that silences the Wayland `Enter` handler so the compositor cannot drag the sender into a tight lock/unlock cycle. Prevents the input-starvation scenario where the keyboard appeared to drop events for ~10 seconds at a time.
 
 ## Scope and Limitations
 
 - Hyprland only. The sender depends on wlr-layer-shell and Hyprland's IPC socket. Other Wayland compositors that support wlr-layer-shell may work but are untested.
 - macOS only on the receiving end. The receiver uses Core Graphics APIs that are macOS-specific.
-- Linux to Mac only. There is no Mac-to-Linux direction.
+- Input direction is Linux to Mac only. Clipboard flows both ways; mouse and keyboard do not.
 - No encryption. Use on a trusted network or behind a VPN.
 - Single sender, single receiver. No multi-machine mesh.
+- Clipboard image support is PNG only. TIFF, PDF, and other pasteboard formats macOS sometimes exposes are not read or written; the text fallback runs in those cases.
+- Clipboard transfers are capped at 32 MiB for images and roughly 64 KiB for text. Content exceeding the cap is silently dropped with a warning in the logs.
 
 ## Project Structure
 
 ```
-styx-proto/      Wire protocol: event types, binary encoding, TCP framing
+styx-proto/      Wire protocol: event types, binary encoding, TCP framing,
+                 cancellation-safe FrameReader
 styx-keymap/     evdev to macOS keycode translation
-styx-sender/     Linux binary: layer-shell capture, evdev grab, Hyprland IPC
-styx-receiver/   macOS binary: CGEvent injection, edge detection, TCP server
+styx-sender/     Linux binary: layer-shell capture, evdev grab, Hyprland IPC,
+                 wl-clipboard integration
+styx-receiver/   macOS binary: CGEvent injection, edge detection, TCP server,
+                 NSPasteboard integration and changeCount poll
 dist/            PKGBUILD, systemd service, launchd plist, install scripts
+docs/            Long-form design notes (clipboard-sync, kvm-software)
 ```
+
+## Wire Protocol
+
+Every frame on the wire is `[u32 BE length][payload]`. The first byte of each payload is a type tag identifying the event:
+
+| Tag | Event | Payload |
+|-----|-------|---------|
+| `0x01` | `CaptureBegin` | `f64` from_bottom, `f64` source_height |
+| `0x02` | `CaptureEnd` | none |
+| `0x03` | `MouseMotion` | `f64` dx, `f64` dy |
+| `0x04` | `MouseButton` | `u32` button, `u8` state |
+| `0x05` | `MouseScroll` | `u8` axis, `f64` value |
+| `0x06` | `KeyPress` | `u32` code |
+| `0x07` | `KeyRelease` | `u32` code |
+| `0x08` | `Heartbeat` | none |
+| `0x09` | `HeartbeatAck` | none |
+| `0x0A` | `ReturnToSender` | `f64` from_bottom, `f64` source_height |
+| `0x40` | `ClipboardData` | `u32` len, UTF-8 bytes |
+| `0x41` | `ClipboardImage` | `u16` format_len, format UTF-8, `u32` data_len, image bytes |
+
+Payloads are capped at 32 MiB (`MAX_FRAME_PAYLOAD` in `styx-proto/src/wire.rs`). Anything larger is dropped by the writer and rejected by the reader.
+
+**Breaking change in 0.4.0:** the frame length prefix was widened from `u16` to `u32` to accommodate image clipboard payloads. A 0.3.x sender cannot communicate with a 0.4.x receiver or vice versa; both sides must be upgraded together.
 
 ## Acknowledgments
 
