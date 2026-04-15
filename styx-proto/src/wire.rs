@@ -13,6 +13,7 @@ const EVENT_RETURN_TO_SENDER: u8 = 0x22;
 const EVENT_HEARTBEAT: u8 = 0x30;
 const EVENT_HEARTBEAT_ACK: u8 = 0x31;
 const EVENT_CLIPBOARD_DATA: u8 = 0x40;
+const EVENT_CLIPBOARD_IMAGE: u8 = 0x41;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -31,6 +32,9 @@ pub enum Event {
     Heartbeat,
     HeartbeatAck,
     ClipboardData { text: String },
+    /// Binary image clipboard payload. `format` is a MIME type string
+    /// (e.g. `image/png`). `data` is the encoded image bytes.
+    ClipboardImage { format: String, data: Vec<u8> },
 }
 
 impl Event {
@@ -47,6 +51,7 @@ impl Event {
             Event::Heartbeat => EVENT_HEARTBEAT,
             Event::HeartbeatAck => EVENT_HEARTBEAT_ACK,
             Event::ClipboardData { .. } => EVENT_CLIPBOARD_DATA,
+            Event::ClipboardImage { .. } => EVENT_CLIPBOARD_IMAGE,
         }
     }
 
@@ -58,6 +63,7 @@ impl Event {
             Event::KeyPress { .. } | Event::KeyRelease { .. } => 4,
             Event::CaptureBegin { .. } | Event::ReturnToSender { .. } => 16,
             Event::ClipboardData { text } => 4 + text.len(),
+            Event::ClipboardImage { format, data } => 2 + format.len() + 4 + data.len(),
             _ => 0,
         }
     }
@@ -88,6 +94,15 @@ impl Event {
                 let len = text.len() as u32;
                 buf[0..4].copy_from_slice(&len.to_be_bytes());
                 buf[4..4 + text.len()].copy_from_slice(text.as_bytes());
+            }
+            Event::ClipboardImage { format, data } => {
+                let fmt_len = format.len() as u16;
+                buf[0..2].copy_from_slice(&fmt_len.to_be_bytes());
+                let fmt_end = 2 + format.len();
+                buf[2..fmt_end].copy_from_slice(format.as_bytes());
+                let data_len = data.len() as u32;
+                buf[fmt_end..fmt_end + 4].copy_from_slice(&data_len.to_be_bytes());
+                buf[fmt_end + 4..fmt_end + 4 + data.len()].copy_from_slice(data);
             }
             _ => {}
         }
@@ -163,6 +178,25 @@ impl Event {
                 let text = String::from_utf8_lossy(&buf[4..4 + text_len]).into_owned();
                 Ok(Event::ClipboardData { text })
             }
+            EVENT_CLIPBOARD_IMAGE => {
+                if buf.len() < 2 {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let fmt_len = u16::from_be_bytes(buf[0..2].try_into().unwrap()) as usize;
+                let fmt_end = 2 + fmt_len;
+                if buf.len() < fmt_end + 4 {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let format = String::from_utf8_lossy(&buf[2..fmt_end]).into_owned();
+                let data_len = u32::from_be_bytes(
+                    buf[fmt_end..fmt_end + 4].try_into().unwrap(),
+                ) as usize;
+                if buf.len() < fmt_end + 4 + data_len {
+                    return Err(DecodeError::TruncatedPayload);
+                }
+                let data = buf[fmt_end + 4..fmt_end + 4 + data_len].to_vec();
+                Ok(Event::ClipboardImage { format, data })
+            }
             _ => Err(DecodeError::UnknownEventType(type_byte)),
         }
     }
@@ -173,7 +207,7 @@ pub enum DecodeError {
     Io(io::Error),
     UnknownEventType(u8),
     TruncatedPayload,
-    PayloadTooLarge(u16),
+    PayloadTooLarge(u32),
     ConnectionClosed,
 }
 
@@ -197,39 +231,56 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-/// Maximum frame payload (type byte + event payload). Sized to fit clipboard
-/// text up to ~64KB within a single u16-prefixed frame.
-const MAX_FRAME_PAYLOAD: u16 = 65535;
+/// Maximum frame payload (type byte + event payload). 32 MiB is enough for
+/// PNG clipboard images well beyond typical 4K screenshots while staying
+/// far below u32::MAX.
+pub const MAX_FRAME_PAYLOAD: u32 = 32 * 1024 * 1024;
+
+/// Length-prefix width on the wire (u32 big-endian).
+const LEN_PREFIX: usize = 4;
 
 /// Largest fixed-size event payload (MouseMotion, CaptureBegin, ReturnToSender).
 const MAX_FIXED_PAYLOAD: usize = 16;
 
 /// Write a length-prefixed event to the stream. The frame format is:
-/// [u16 BE length][u8 event_type][payload bytes]
+/// [u32 BE length][u8 event_type][payload bytes]
 /// Length includes the type byte and payload, but not itself.
 pub async fn write_event<W: AsyncWrite + Unpin>(w: &mut W, event: &Event) -> io::Result<()> {
     let payload_len = event.payload_len();
-    let frame_len = (1 + payload_len) as u16;
+    let frame_bytes = 1 + payload_len;
+    if frame_bytes > MAX_FRAME_PAYLOAD as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("event payload too large ({} bytes)", frame_bytes),
+        ));
+    }
+    let frame_len = frame_bytes as u32;
 
     if payload_len <= MAX_FIXED_PAYLOAD {
-        let mut buf = [0u8; 2 + 1 + MAX_FIXED_PAYLOAD];
-        buf[0..2].copy_from_slice(&frame_len.to_be_bytes());
-        buf[2] = event.type_byte();
-        event.encode_payload(&mut buf[3..3 + payload_len]);
-        w.write_all(&buf[..2 + 1 + payload_len]).await
+        let mut buf = [0u8; LEN_PREFIX + 1 + MAX_FIXED_PAYLOAD];
+        buf[0..LEN_PREFIX].copy_from_slice(&frame_len.to_be_bytes());
+        buf[LEN_PREFIX] = event.type_byte();
+        event.encode_payload(&mut buf[LEN_PREFIX + 1..LEN_PREFIX + 1 + payload_len]);
+        w.write_all(&buf[..LEN_PREFIX + 1 + payload_len]).await
     } else {
-        let mut buf = vec![0u8; 2 + 1 + payload_len];
-        buf[0..2].copy_from_slice(&frame_len.to_be_bytes());
-        buf[2] = event.type_byte();
-        event.encode_payload(&mut buf[3..]);
+        let mut buf = vec![0u8; LEN_PREFIX + 1 + payload_len];
+        buf[0..LEN_PREFIX].copy_from_slice(&frame_len.to_be_bytes());
+        buf[LEN_PREFIX] = event.type_byte();
+        event.encode_payload(&mut buf[LEN_PREFIX + 1..]);
         w.write_all(&buf).await
     }
 }
 
 /// Read a length-prefixed event from the stream. Returns `DecodeError::ConnectionClosed`
 /// on clean EOF.
+///
+/// WARNING: this function is NOT cancellation-safe. Cancelling the returned
+/// future mid-read can drop bytes from the stream and desynchronise
+/// subsequent reads. Callers that need cancellation safety (e.g. using
+/// `recv` inside a `tokio::select!`) should use [`FrameReader`] instead,
+/// which keeps received bytes in a persistent buffer across calls.
 pub async fn read_event<R: AsyncRead + Unpin>(r: &mut R) -> Result<Event, DecodeError> {
-    let mut len_buf = [0u8; 2];
+    let mut len_buf = [0u8; LEN_PREFIX];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -237,7 +288,7 @@ pub async fn read_event<R: AsyncRead + Unpin>(r: &mut R) -> Result<Event, Decode
         }
         Err(e) => return Err(DecodeError::Io(e)),
     }
-    let frame_len = u16::from_be_bytes(len_buf);
+    let frame_len = u32::from_be_bytes(len_buf);
 
     if frame_len == 0 {
         return Err(DecodeError::TruncatedPayload);
@@ -262,6 +313,69 @@ pub async fn read_event<R: AsyncRead + Unpin>(r: &mut R) -> Result<Event, Decode
     }
 }
 
+/// Try to pull one complete event out of an in-memory buffer. Returns
+/// `Ok(None)` if the buffer does not yet hold a full frame. On success
+/// returns the decoded event and the number of bytes consumed; the
+/// caller should discard that many bytes from the front of the buffer.
+pub fn try_decode_event(buf: &[u8]) -> Result<Option<(Event, usize)>, DecodeError> {
+    if buf.len() < LEN_PREFIX {
+        return Ok(None);
+    }
+    let frame_len = u32::from_be_bytes(buf[0..LEN_PREFIX].try_into().unwrap());
+    if frame_len == 0 {
+        return Err(DecodeError::TruncatedPayload);
+    }
+    if frame_len > MAX_FRAME_PAYLOAD {
+        return Err(DecodeError::PayloadTooLarge(frame_len));
+    }
+    let frame_usize = frame_len as usize;
+    let total = LEN_PREFIX + frame_usize;
+    if buf.len() < total {
+        return Ok(None);
+    }
+    let type_byte = buf[LEN_PREFIX];
+    let payload = &buf[LEN_PREFIX + 1..total];
+    let event = Event::decode_payload(type_byte, payload)?;
+    Ok(Some((event, total)))
+}
+
+/// Cancellation-safe wrapper around an `AsyncRead` that accumulates
+/// partial reads in an internal buffer. If the future returned by
+/// `read_event` is dropped before completion, the bytes pulled off the
+/// underlying stream remain in the buffer and the next call resumes
+/// from the same point.
+pub struct FrameReader<R> {
+    inner: R,
+    buf: Vec<u8>,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    pub fn new(inner: R) -> Self {
+        FrameReader { inner, buf: Vec::with_capacity(4096) }
+    }
+
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Read the next event. Cancellation-safe: if the future is dropped,
+    /// any bytes already pulled from the stream are preserved.
+    pub async fn read_event(&mut self) -> Result<Event, DecodeError> {
+        loop {
+            if let Some((event, consumed)) = try_decode_event(&self.buf)? {
+                self.buf.drain(..consumed);
+                return Ok(event);
+            }
+            let mut chunk = [0u8; 16 * 1024];
+            let n = self.inner.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(DecodeError::ConnectionClosed);
+            }
+            self.buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +395,10 @@ mod tests {
             Event::Heartbeat,
             Event::HeartbeatAck,
             Event::ClipboardData { text: "hello clipboard".to_string() },
+            Event::ClipboardImage {
+                format: "image/png".to_string(),
+                data: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
         ]
     }
 
@@ -318,19 +436,20 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_type_rejected() {
-        let frame = [0x00, 0x01, 0xFF]; // length=1, type=0xFF
+        // u32 BE length=1, type=0xFF
+        let frame = [0x00, 0x00, 0x00, 0x01, 0xFF];
         let result = read_event(&mut frame.as_slice()).await;
         assert!(matches!(result, Err(DecodeError::UnknownEventType(0xFF))));
     }
 
     #[tokio::test]
     async fn oversized_frame_rejected() {
-        // MAX_FRAME_PAYLOAD is u16::MAX (65535), so any valid u16 length is accepted.
-        // We can't exceed u16::MAX with a u16 length prefix, so this test verifies
-        // that an unknown event type inside a large frame is still rejected.
-        let frame = vec![0x00, 0x03, 0xFF, 0x00, 0x00]; // length=3, type=0xFF unknown
+        // Declare a frame length exceeding MAX_FRAME_PAYLOAD.
+        let too_big = MAX_FRAME_PAYLOAD + 1;
+        let mut frame = too_big.to_be_bytes().to_vec();
+        frame.push(0xFF);
         let result = read_event(&mut frame.as_slice()).await;
-        assert!(matches!(result, Err(DecodeError::UnknownEventType(0xFF))));
+        assert!(matches!(result, Err(DecodeError::PayloadTooLarge(len)) if len == too_big));
     }
 
     #[tokio::test]
@@ -350,5 +469,108 @@ mod tests {
         write_event(&mut buf, &event).await.unwrap();
         let decoded = read_event(&mut buf.as_slice()).await.unwrap();
         assert_eq!(event, decoded);
+    }
+
+    #[tokio::test]
+    async fn clipboard_image_multi_mb_round_trip() {
+        // Simulate a realistic PNG screenshot payload (~4 MB) to exercise the
+        // u32 length prefix and the heap-allocated write/read paths.
+        let data: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
+        let event = Event::ClipboardImage {
+            format: "image/png".to_string(),
+            data: data.clone(),
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, &event).await.unwrap();
+        let decoded = read_event(&mut buf.as_slice()).await.unwrap();
+        assert_eq!(
+            Event::ClipboardImage { format: "image/png".to_string(), data },
+            decoded,
+        );
+    }
+
+    #[tokio::test]
+    async fn clipboard_image_empty_payload() {
+        let event = Event::ClipboardImage {
+            format: "image/png".to_string(),
+            data: Vec::new(),
+        };
+        let mut buf = Vec::new();
+        write_event(&mut buf, &event).await.unwrap();
+        let decoded = read_event(&mut buf.as_slice()).await.unwrap();
+        assert_eq!(event, decoded);
+    }
+
+    #[tokio::test]
+    async fn frame_reader_handles_chunked_reads() {
+        use tokio::io::AsyncWriteExt;
+
+        // Duplex buffer generously sized so writes never block on the reader.
+        let (mut w, r) = tokio::io::duplex(1 << 20);
+        let mut fr = FrameReader::new(r);
+
+        let event = Event::ClipboardImage {
+            format: "image/png".to_string(),
+            data: vec![0xAB; 10_000],
+        };
+        let mut bytes = Vec::new();
+        write_event(&mut bytes, &event).await.unwrap();
+        let mid = bytes.len() / 2;
+
+        w.write_all(&bytes[..mid]).await.unwrap();
+        tokio::task::yield_now().await;
+        w.write_all(&bytes[mid..]).await.unwrap();
+
+        let decoded = fr.read_event().await.unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[tokio::test]
+    async fn frame_reader_survives_cancellation_mid_frame() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut w, r) = tokio::io::duplex(1 << 20);
+        let mut fr = FrameReader::new(r);
+
+        let event = Event::ClipboardImage {
+            format: "image/png".to_string(),
+            data: vec![0xCD; 10_000],
+        };
+        let mut bytes = Vec::new();
+        write_event(&mut bytes, &event).await.unwrap();
+        let mid = bytes.len() / 2;
+
+        // Write only the first half; read_event will consume what is
+        // available and then block waiting for the rest.
+        w.write_all(&bytes[..mid]).await.unwrap();
+
+        // Cancel read_event mid-frame. If FrameReader is cancel-safe, the
+        // bytes it already consumed from the duplex survive in its
+        // internal buffer and are reused on the next call.
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            fr.read_event(),
+        ).await;
+        assert!(timed.is_err(), "expected timeout while frame is incomplete");
+
+        // Write the remaining half. The next read_event must decode the
+        // full event correctly (i.e. not interpret mid-frame bytes as a
+        // bogus length header, which is the bug this test guards against).
+        w.write_all(&bytes[mid..]).await.unwrap();
+        let decoded = fr.read_event().await.unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[tokio::test]
+    async fn write_rejects_payload_over_cap() {
+        // One byte over MAX_FRAME_PAYLOAD including the type byte.
+        let oversize = MAX_FRAME_PAYLOAD as usize; // type byte + payload = MAX+1
+        let event = Event::ClipboardImage {
+            format: String::new(),
+            data: vec![0u8; oversize], // 2 (fmt_len) + 0 + 4 (data_len) + oversize bytes
+        };
+        let mut buf = Vec::new();
+        let result = write_event(&mut buf, &event).await;
+        assert!(result.is_err());
     }
 }
