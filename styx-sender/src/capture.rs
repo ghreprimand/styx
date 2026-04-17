@@ -93,6 +93,7 @@ struct Globals {
 #[derive(Debug, Clone)]
 struct OutputInfo {
     name: String,
+    description: String,
     #[allow(dead_code)]
     position: (i32, i32),
     size: (i32, i32),
@@ -231,7 +232,7 @@ impl Capture {
             let (target_output, target_info) = state
                 .output_info
                 .iter()
-                .find(|(_, info)| &info.name == name)
+                .find(|(_, info)| &info.name == name || info.description.contains(name))
                 .ok_or_else(|| format!("monitor '{}' not found", name))?
                 .clone();
 
@@ -740,6 +741,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     output,
                     OutputInfo {
                         name: String::new(),
+                        description: String::new(),
                         position: (0, 0),
                         size: (0, 0),
                     },
@@ -776,6 +778,9 @@ impl Dispatch<ZxdgOutputV1, WlOutput> for State {
         match event {
             zxdg_output_v1::Event::Name { name } => {
                 info.name = name;
+            }
+            zxdg_output_v1::Event::Description { description } => {
+                info.description = description;
             }
             zxdg_output_v1::Event::LogicalPosition { x, y } => {
                 info.position = (x, y);

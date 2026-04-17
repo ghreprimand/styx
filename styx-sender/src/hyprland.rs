@@ -7,6 +7,8 @@ use tokio::net::UnixStream;
 #[derive(Debug, Deserialize)]
 struct Monitor {
     name: String,
+    #[serde(default)]
+    description: String,
     x: i32,
     y: i32,
     width: i32,
@@ -43,7 +45,7 @@ pub async fn get_monitor(name: &str) -> Result<MonitorGeometry, Box<dyn std::err
     let monitors: Vec<Monitor> = serde_json::from_str(&json)?;
     let mon = monitors
         .into_iter()
-        .find(|m| m.name == name)
+        .find(|m| m.name == name || m.description.contains(name))
         .ok_or_else(|| format!("monitor '{}' not found via Hyprland IPC", name))?;
     // Hyprland reports native (pre-rotation, pre-scale) width/height.
     // Swap for 90° (1) and 270° (3) transforms, then divide by scale so

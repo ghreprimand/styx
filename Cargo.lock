@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "styx-receiver"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "bitflags 2.11.0",
  "clap",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "styx-sender"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "clap",
  "env_logger",
