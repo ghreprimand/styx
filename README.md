@@ -177,10 +177,16 @@ See [docs/sender-gui.md](docs/sender-gui.md) for installation and behavior detai
 
 ### Linux (Arch Linux)
 
-A PKGBUILD and systemd user service are provided in `dist/`.
+A PKGBUILD, systemd user service, and sender GUI desktop entry are provided in `dist/`. The sender package installs both `styx-sender` and `styx-sender-gui`; after installation, the GUI appears in application launchers as **Styx Sender**.
 
 ```
 systemctl --user enable --now styx-sender
+```
+
+The GUI can be opened from the launcher or run directly:
+
+```
+styx-sender-gui
 ```
 
 ### macOS
