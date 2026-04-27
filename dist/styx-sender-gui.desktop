@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Styx Sender
+GenericName=Styx Sender Settings
+Comment=Configure the Styx sender
+Exec=styx-sender-gui
+Icon=input-mouse
+Categories=Settings;
+Keywords=styx;styx-sender;kvm;sender;
+Terminal=false

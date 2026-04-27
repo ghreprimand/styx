@@ -161,6 +161,18 @@ RUST_LOG=info ./styx-sender
 
 Move the cursor to the configured edge of the Linux monitor to begin controlling the Mac. Move it to the return edge on the Mac to switch back.
 
+### Sender GUI
+
+The Linux sender also includes a small GTK settings utility:
+
+```
+styx-sender-gui
+```
+
+It edits `~/.config/styx/config.toml`, can populate the Linux crossover monitor list from the current Hyprland outputs, and can restart the `styx-sender.service` user service after saving. The Arch package installs a desktop entry named **Styx Sender**.
+
+See [docs/sender-gui.md](docs/sender-gui.md) for installation and behavior details.
+
 ## Installation
 
 ### Linux (Arch Linux)

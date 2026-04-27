@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, GLib
+
+
+EDGES = ("left", "right", "top", "bottom")
+DEFAULT_CONFIG = "~/.config/styx/config.toml"
+
+
+def expand_path(path):
+    return Path(os.path.expanduser(path))
+
+
+def toml_string(value):
+    return json.dumps(str(value))
+
+
+def toml_array(values):
+    return "[" + ", ".join(toml_string(v) for v in values) + "]"
+
+
+def text_lines(text):
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def run_command(args, timeout=5):
+    return subprocess.run(
+        args,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def current_monitors():
+    result = run_command(["hyprctl", "monitors", "-j"])
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "hyprctl failed").strip())
+    return json.loads(result.stdout)
+
+
+def keyboard_devices():
+    by_id = Path("/dev/input/by-id")
+    if not by_id.exists():
+        return []
+    devices = []
+    for path in sorted(by_id.iterdir(), key=lambda p: p.name):
+        name = path.name
+        if "event" in name and "kbd" in name and "if0" not in name:
+            devices.append(str(path))
+    return devices
+
+
+def load_config(path):
+    path = expand_path(path)
+    if not path.exists():
+        return {}
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def normalized_config(config):
+    sender = dict(config.get("sender", {}))
+    heartbeat = dict(sender.get("heartbeat", {}))
+    receiver = dict(config.get("receiver", {}))
+    return sender, heartbeat, receiver
+
+
+def write_config(path, sender, heartbeat, receiver):
+    path = expand_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    hosts = sender["receiver_hosts"]
+    monitors = sender["monitors"]
+    keyboard_device = sender.get("keyboard_device", "").strip()
+
+    lines = [
+        "[sender]",
+        f"receiver_hosts = {toml_array(hosts)}",
+        f"receiver_port = {int(sender['receiver_port'])}",
+        f"monitors = {toml_array(monitors)}",
+        f"edge = {toml_string(sender['edge'])}",
+    ]
+    if keyboard_device:
+        lines.append(f"keyboard_device = {toml_string(keyboard_device)}")
+    lines.extend(
+        [
+            "",
+            "[sender.heartbeat]",
+            f"active_interval_ms = {int(heartbeat['active_interval_ms'])}",
+            f"idle_interval_ms = {int(heartbeat['idle_interval_ms'])}",
+            f"miss_threshold = {int(heartbeat['miss_threshold'])}",
+        ]
+    )
+
+    if receiver:
+        lines.extend(["", "[receiver]"])
+        for key in ("listen_host", "listen_port", "return_edge", "swap_alt_cmd"):
+            if key not in receiver:
+                continue
+            value = receiver[key]
+            if isinstance(value, bool):
+                lines.append(f"{key} = {'true' if value else 'false'}")
+            elif isinstance(value, int):
+                lines.append(f"{key} = {value}")
+            else:
+                lines.append(f"{key} = {toml_string(value)}")
+        for key in ("listen_hosts", "allowed_senders"):
+            if key in receiver:
+                lines.append(f"{key} = {toml_array(receiver[key])}")
+
+    contents = "\n".join(lines) + "\n"
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent) as f:
+        f.write(contents)
+        tmp = Path(f.name)
+    os.replace(tmp, path)
+
+
+def config_matches_monitor(value, monitor):
+    name = monitor.get("name", "")
+    description = monitor.get("description", "")
+    return value == name or value == description or (value and value in description)
+
+
+class SenderGui(Gtk.Application):
+    def __init__(self, config_path):
+        super().__init__(application_id="dev.styx.SenderGui")
+        self.config_path = config_path
+        self.receiver = {}
+        self.monitor_checks = []
+        self.monitors = []
+
+    def do_activate(self):
+        self.window = Gtk.ApplicationWindow(application=self)
+        self.window.set_title("Styx Sender")
+        self.window.set_default_size(760, 640)
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        root.set_margin_top(16)
+        root.set_margin_bottom(16)
+        root.set_margin_start(16)
+        root.set_margin_end(16)
+        self.window.set_child(root)
+
+        self.config_label = Gtk.Label(xalign=0)
+        self.config_label.add_css_class("dim-label")
+        root.append(self.config_label)
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        root.append(grid)
+
+        self.hosts_view = self.text_view(height=74)
+        self.port_spin = Gtk.SpinButton.new_with_range(1, 65535, 1)
+        self.port_spin.set_value(4242)
+        self.edge_combo = Gtk.ComboBoxText()
+        for edge in EDGES:
+            self.edge_combo.append_text(edge)
+        self.edge_combo.set_active(0)
+        self.monitors_view = self.text_view(height=86)
+        self.keyboard_entry = Gtk.Entry()
+        self.active_spin = Gtk.SpinButton.new_with_range(100, 60000, 100)
+        self.idle_spin = Gtk.SpinButton.new_with_range(100, 300000, 100)
+        self.miss_spin = Gtk.SpinButton.new_with_range(1, 100, 1)
+
+        self.add_row(grid, 0, "Receiver hosts", self.hosts_view)
+        self.add_row(grid, 1, "Receiver port", self.port_spin)
+        self.add_row(grid, 2, "Linux crossover edge", self.edge_combo)
+        self.add_row(grid, 3, "Linux crossover monitors", self.monitors_view)
+        self.add_row(grid, 4, "Keyboard device", self.keyboard_entry)
+        self.add_row(grid, 5, "Active heartbeat ms", self.active_spin)
+        self.add_row(grid, 6, "Idle heartbeat ms", self.idle_spin)
+        self.add_row(grid, 7, "Miss threshold", self.miss_spin)
+
+        monitor_frame = Gtk.Frame(label="Available Hyprland Outputs")
+        root.append(monitor_frame)
+        monitor_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        monitor_box.set_margin_top(8)
+        monitor_box.set_margin_bottom(8)
+        monitor_box.set_margin_start(8)
+        monitor_box.set_margin_end(8)
+        monitor_frame.set_child(monitor_box)
+        self.monitor_box = monitor_box
+
+        monitor_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        root.append(monitor_buttons)
+        self.add_button(monitor_buttons, "Refresh Outputs", self.refresh_monitors)
+        self.add_button(monitor_buttons, "Use Checked Outputs", self.use_selected_monitors)
+        self.add_button(monitor_buttons, "Detect Keyboard", self.detect_keyboard)
+
+        action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        action_box.set_halign(Gtk.Align.END)
+        root.append(action_box)
+        self.add_button(action_box, "Reload", self.load_into_form)
+        self.add_button(action_box, "Save", self.save)
+        self.add_button(action_box, "Save & Restart", self.save_and_restart)
+        self.add_button(action_box, "Restart Sender", self.restart_sender)
+
+        self.status = Gtk.Label(xalign=0)
+        self.status.add_css_class("dim-label")
+        root.append(self.status)
+
+        self.load_into_form()
+        self.refresh_monitors()
+        self.window.present()
+
+    def text_view(self, height):
+        view = Gtk.TextView()
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_min_content_height(height)
+        scrolled.set_child(view)
+        view.scrolled = scrolled
+        return view
+
+    def add_row(self, grid, row, label, widget):
+        label_widget = Gtk.Label(label=label, xalign=0)
+        label_widget.set_valign(Gtk.Align.START)
+        grid.attach(label_widget, 0, row, 1, 1)
+        grid.attach(getattr(widget, "scrolled", widget), 1, row, 1, 1)
+
+    def add_button(self, box, label, callback):
+        button = Gtk.Button(label=label)
+        button.connect("clicked", lambda _button: callback())
+        box.append(button)
+        return button
+
+    def set_status(self, text):
+        self.status.set_text(text)
+
+    def buffer_text(self, view):
+        buf = view.get_buffer()
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+
+    def set_buffer_text(self, view, text):
+        view.get_buffer().set_text(text)
+
+    def load_into_form(self):
+        try:
+            config = load_config(self.config_path)
+            sender, heartbeat, receiver = normalized_config(config)
+            self.receiver = receiver
+
+            hosts = sender.get("receiver_hosts") or []
+            if sender.get("receiver_host"):
+                hosts = [sender["receiver_host"], *hosts]
+            hosts = list(dict.fromkeys(hosts))
+
+            monitors = sender.get("monitors") or []
+            if sender.get("monitor"):
+                monitors = [sender["monitor"], *monitors]
+            monitors = list(dict.fromkeys(monitors))
+
+            self.config_label.set_text(f"Config: {expand_path(self.config_path)}")
+            self.set_buffer_text(self.hosts_view, "\n".join(hosts))
+            self.port_spin.set_value(int(sender.get("receiver_port", 4242)))
+            edge = str(sender.get("edge", "left")).lower()
+            self.edge_combo.set_active(EDGES.index(edge) if edge in EDGES else 0)
+            self.set_buffer_text(self.monitors_view, "\n".join(monitors))
+            self.keyboard_entry.set_text(str(sender.get("keyboard_device", "")))
+            self.active_spin.set_value(int(heartbeat.get("active_interval_ms", 1000)))
+            self.idle_spin.set_value(int(heartbeat.get("idle_interval_ms", 5000)))
+            self.miss_spin.set_value(int(heartbeat.get("miss_threshold", 3)))
+            self.set_status("Loaded")
+        except Exception as e:
+            self.set_status(f"Load failed: {e}")
+
+    def collect_form(self):
+        hosts = text_lines(self.buffer_text(self.hosts_view))
+        monitors = text_lines(self.buffer_text(self.monitors_view))
+        if not hosts:
+            raise ValueError("receiver_hosts needs at least one address")
+        if not monitors:
+            raise ValueError("monitors needs at least one display")
+        edge = self.edge_combo.get_active_text() or "left"
+        return (
+            {
+                "receiver_hosts": hosts,
+                "receiver_port": int(self.port_spin.get_value()),
+                "monitors": monitors,
+                "edge": edge,
+                "keyboard_device": self.keyboard_entry.get_text().strip(),
+            },
+            {
+                "active_interval_ms": int(self.active_spin.get_value()),
+                "idle_interval_ms": int(self.idle_spin.get_value()),
+                "miss_threshold": int(self.miss_spin.get_value()),
+            },
+        )
+
+    def save(self):
+        try:
+            sender, heartbeat = self.collect_form()
+            write_config(self.config_path, sender, heartbeat, self.receiver)
+            self.set_status("Saved")
+        except Exception as e:
+            self.set_status(f"Save failed: {e}")
+
+    def save_and_restart(self):
+        self.save()
+        if self.status.get_text() == "Saved":
+            self.restart_sender()
+
+    def restart_sender(self):
+        result = run_command(["systemctl", "--user", "restart", "styx-sender.service"], timeout=15)
+        if result.returncode == 0:
+            self.set_status("Sender restarted")
+        else:
+            self.set_status(f"Restart failed: {(result.stderr or result.stdout).strip()}")
+
+    def refresh_monitors(self):
+        try:
+            self.monitors = current_monitors()
+            while child := self.monitor_box.get_first_child():
+                self.monitor_box.remove(child)
+            configured = text_lines(self.buffer_text(self.monitors_view))
+            self.monitor_checks = []
+            for mon in self.monitors:
+                description = mon.get("description", "")
+                name = mon.get("name", "")
+                width = mon.get("width", "?")
+                height = mon.get("height", "?")
+                x = mon.get("x", "?")
+                y = mon.get("y", "?")
+                scale = mon.get("scale", 1)
+                transform = mon.get("transform", 0)
+                label = f"{name} - {description} - {width}x{height} at ({x},{y}), scale {scale}, transform {transform}"
+                check = Gtk.CheckButton(label=label)
+                check.set_active(any(config_matches_monitor(value, mon) for value in configured))
+                self.monitor_box.append(check)
+                self.monitor_checks.append((check, mon))
+            self.set_status("Hyprland outputs refreshed")
+        except Exception as e:
+            self.set_status(f"Monitor refresh failed: {e}")
+
+    def use_selected_monitors(self):
+        selected = []
+        for check, mon in self.monitor_checks:
+            if check.get_active():
+                selected.append(mon.get("description") or mon.get("name"))
+        self.set_buffer_text(self.monitors_view, "\n".join(selected))
+        self.set_status("Linux crossover monitors updated")
+
+    def detect_keyboard(self):
+        devices = keyboard_devices()
+        if devices:
+            self.keyboard_entry.set_text(devices[0])
+            self.set_status("Keyboard device set")
+        else:
+            self.set_status("No keyboard device found")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=DEFAULT_CONFIG)
+    args, gtk_args = parser.parse_known_args()
+    app = SenderGui(args.config)
+    return app.run([sys.argv[0], *gtk_args])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
