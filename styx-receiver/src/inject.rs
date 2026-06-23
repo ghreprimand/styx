@@ -182,8 +182,16 @@ impl Injector {
     /// Returns true if the cursor hit the return edge.
     pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
         self.declare_user_activity();
-        let new_x = (self.cursor_pos.x + dx).clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0);
-        let new_y = (self.cursor_pos.y + dy).clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0);
+        let clamped_x = (self.cursor_pos.x + dx).clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0);
+        let clamped_y = (self.cursor_pos.y + dy).clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0);
+
+        // Decide whether the cursor has reached the outer return edge, and
+        // pin it to that edge if so. See `resolve_edge_hit` for why this is
+        // done against the specific edge display rather than the global
+        // bounding box.
+        let (new_x, new_y, hit) =
+            resolve_edge_hit(&self.edge_displays, self.return_edge, clamped_x, clamped_y);
+
         self.cursor_pos = CGPoint::new(new_x, new_y);
 
         let event_type = if self.button_state.left.pressed {
@@ -207,23 +215,9 @@ impl Injector {
             event.post(CGEventTapLocation::HID);
         }
 
-        // Only treat the cursor as having hit the return edge if it is on
-        // one of the displays that owns that edge AND at that display's own
-        // outer boundary. This prevents a monitor that happens to be at the
-        // rightmost x (but that is not part of the return edge) from falsely
-        // triggering return, and lets either of multiple stacked edge
-        // displays send the return signal.
-        self.edge_displays.iter().any(|d| {
-            let inside = new_x >= d.min_x && new_x < d.max_x
-                && new_y >= d.min_y && new_y < d.max_y;
-            if !inside { return false; }
-            match self.return_edge {
-                Edge::Right => new_x >= d.max_x - 1.0,
-                Edge::Left => new_x <= d.min_x,
-                Edge::Bottom => new_y >= d.max_y - 1.0,
-                Edge::Top => new_y <= d.min_y,
-            }
-        })
+        // The hit decision (and the accompanying pin) was computed above by
+        // `resolve_edge_hit`, before the cursor was moved.
+        hit
     }
 
     pub fn inject_mouse_button(&mut self, button: u32, state: u8) {
@@ -415,6 +409,57 @@ impl Injector {
     }
 }
 
+/// Given the cursor's post-clamp position and the set of displays that own
+/// the return edge, decide whether the cursor has reached the outer return
+/// edge. If it has, pin the returned coordinate to that edge display's OWN
+/// outer boundary and report `true`.
+///
+/// Detection is done against the specific edge display whose perpendicular
+/// span contains the cursor -- not against the global bounding box. This
+/// matters when the edge displays are not flush. Example: a portrait
+/// monitor (right edge x=1440) stacked above a laptop panel (right edge
+/// x=1470). The caller's global clamp caps x at 1469, which is past the
+/// portrait's right edge, so while the cursor is on the portrait it can
+/// drift into the x in (1440, 1469] band that belongs to no display. There
+/// a fixed 1 px "at the edge" test can only be satisfied by chance, so the
+/// cursor appears to stick until the user jitters it back into that band.
+/// Pinning to the edge display's own boundary removes the dead zone and
+/// makes the crossover fire the moment the cursor reaches the portrait's
+/// edge. Detecting per-display also keeps a non-edge monitor that merely
+/// sits at the extreme x from falsely triggering return, and lets any of
+/// several stacked edge displays send the signal.
+fn resolve_edge_hit(
+    edge_displays: &[DisplayBounds],
+    return_edge: Edge,
+    x: f64,
+    y: f64,
+) -> (f64, f64, bool) {
+    let mut nx = x;
+    let mut ny = y;
+    let hit = edge_displays
+        .iter()
+        .find(|d| match return_edge {
+            Edge::Right | Edge::Left => ny >= d.min_y && ny < d.max_y,
+            Edge::Top | Edge::Bottom => nx >= d.min_x && nx < d.max_x,
+        })
+        .map(|d| match return_edge {
+            Edge::Right => {
+                if nx >= d.max_x - 1.0 { nx = d.max_x - 1.0; true } else { false }
+            }
+            Edge::Left => {
+                if nx <= d.min_x { nx = d.min_x; true } else { false }
+            }
+            Edge::Bottom => {
+                if ny >= d.max_y - 1.0 { ny = d.max_y - 1.0; true } else { false }
+            }
+            Edge::Top => {
+                if ny <= d.min_y { ny = d.min_y; true } else { false }
+            }
+        })
+        .unwrap_or(false);
+    (nx, ny, hit)
+}
+
 /// How close two monitor edges must be (in points) to count as occupying
 /// the same return-edge column. Handles displays whose outer edges do not
 /// line up exactly -- e.g. a portrait monitor stacked above a laptop
@@ -536,5 +581,89 @@ fn swap_alt_meta(code: u32) -> u32 {
         styx_keymap::KEY_LEFT_META => styx_keymap::KEY_LEFT_ALT,
         styx_keymap::KEY_RIGHT_META => styx_keymap::KEY_RIGHT_ALT,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_edge_hit, DisplayBounds, Edge};
+
+    fn db(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> DisplayBounds {
+        DisplayBounds { min_x, min_y, max_x, max_y }
+    }
+
+    // Mirrors a real stacked layout reported in the field: a portrait
+    // monitor (right edge x=1440, occupying y in [-2560, 0)) sitting above
+    // a built-in laptop panel (right edge x=1470, y in [0, 956)). Both own
+    // the Right return edge (within EDGE_ALIGN_TOLERANCE of the extreme x
+    // of 1470). The global bounding box right edge is 1470, so the caller
+    // clamps cursor x to 1469.
+    fn stacked_right_edge() -> Vec<DisplayBounds> {
+        vec![
+            db(0.0, 0.0, 1470.0, 956.0),       // built-in
+            db(0.0, -2560.0, 1440.0, 0.0),     // portrait above
+        ]
+    }
+
+    // The regression: on the portrait, the cursor clamped to the global
+    // max_x (1469) lands past the portrait's own right edge (1440). The old
+    // code required x to be inside [1439, 1440) to register a hit, so it
+    // stuck. The fix must register a hit and pin x back to 1439.
+    #[test]
+    fn portrait_drifted_past_own_edge_hits_and_pins() {
+        let displays = stacked_right_edge();
+        let (nx, _ny, hit) = resolve_edge_hit(&displays, Edge::Right, 1469.0, -1000.0);
+        assert!(hit, "cursor on portrait at/over its right edge should register a hit");
+        assert_eq!(nx, 1439.0, "x should be pinned to the portrait's own outer edge");
+    }
+
+    // The built-in panel always worked because its right edge equals the
+    // global max_x; confirm the refactor keeps it working.
+    #[test]
+    fn builtin_at_edge_still_hits() {
+        let displays = stacked_right_edge();
+        let (nx, _ny, hit) = resolve_edge_hit(&displays, Edge::Right, 1469.0, 500.0);
+        assert!(hit);
+        assert_eq!(nx, 1469.0);
+    }
+
+    // Being on the portrait but not yet at its edge must NOT trigger return,
+    // and must not move the cursor.
+    #[test]
+    fn portrait_not_at_edge_does_not_hit() {
+        let displays = stacked_right_edge();
+        let (nx, ny, hit) = resolve_edge_hit(&displays, Edge::Right, 700.0, -1000.0);
+        assert!(!hit);
+        assert_eq!((nx, ny), (700.0, -1000.0));
+    }
+
+    // A position whose y falls in the gap between the two stacked displays
+    // (the built-in tops out at y=956, nothing owns the edge at y=975) is
+    // owned by no edge display, so no hit fires and the cursor is untouched.
+    #[test]
+    fn gap_between_stacked_displays_does_not_hit() {
+        let displays = stacked_right_edge();
+        let (nx, ny, hit) = resolve_edge_hit(&displays, Edge::Right, 1469.0, 975.0);
+        assert!(!hit);
+        assert_eq!((nx, ny), (1469.0, 975.0));
+    }
+
+    // Left return edge, single display anchored at x=0: reaching x<=0 pins
+    // to 0 and hits.
+    #[test]
+    fn left_edge_pins_to_min_x() {
+        let displays = vec![db(0.0, 0.0, 1440.0, 2560.0)];
+        let (nx, _ny, hit) = resolve_edge_hit(&displays, Edge::Left, 0.0, 1000.0);
+        assert!(hit);
+        assert_eq!(nx, 0.0);
+    }
+
+    // Bottom return edge: reaching y>=max_y-1 pins and hits.
+    #[test]
+    fn bottom_edge_pins_to_max_y() {
+        let displays = vec![db(0.0, 0.0, 1920.0, 1080.0)];
+        let (_nx, ny, hit) = resolve_edge_hit(&displays, Edge::Bottom, 500.0, 1079.0);
+        assert!(hit);
+        assert_eq!(ny, 1079.0);
     }
 }
