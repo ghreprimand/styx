@@ -4,6 +4,23 @@ A purpose-built software KVM for sharing a keyboard and mouse from a [Hyprland](
 
 Styx is narrow in scope by design. It does one thing: send keyboard and mouse input from a Hyprland Wayland compositor to macOS, with seamless edge-based transitions. It is not a general-purpose KVM, does not support Windows, does not support arbitrary Wayland compositors, and is unidirectional (Linux to Mac only). If you need broader compatibility, use [Input Leap](https://github.com/input-leap/input-leap), [Deskflow](https://github.com/deskflow/deskflow), or [lan-mouse](https://github.com/feschber/lan-mouse).
 
+## Quickstart
+
+A minimal Linux-to-Mac setup, start to finish. Each step links to a fuller section below.
+
+1. **Find your two values.**
+   - Mac's LAN IP: run `ipconfig getifaddr en0` on the Mac (Wi-Fi is usually `en0`, Ethernet often `en1`).
+   - Linux crossover monitor name: run `hyprctl monitors` on Linux and note the `Monitor <name>` line (e.g. `DP-1`).
+2. **Build both binaries** (see [Building](#building)).
+   - Linux: `cargo build --release -p styx-sender`
+   - Mac: `cargo build --release -p styx-receiver`
+3. **Write `~/.config/styx/config.toml` on each machine** (see [Configuration](#configuration)).
+   - Linux: set `receiver_host` to the Mac's IP, `monitor` to the output name, `edge` to the side facing the Mac.
+   - Mac: set `return_edge` to the side facing Linux. Keep the sender's `receiver_port` and the receiver's `listen_port` equal (4242 by convention).
+4. **Install and start the receiver on the Mac** (see [Installation › macOS](#macos)): run `./dist/macos/install.sh`, then grant Accessibility permission under System Settings › Privacy & Security › Accessibility for **Styx Receiver.app**.
+5. **Start the sender on Linux**: `systemctl --user enable --now styx-sender`, or run `RUST_LOG=info ./styx-sender` directly.
+6. **Cross over.** Move the cursor to the configured edge of the Linux monitor — it appears on the Mac. Move to the Mac's return edge to come back.
+
 ## Why This Exists
 
 There are many keyboard/mouse sharing tools. None of them work reliably on Hyprland.
@@ -77,7 +94,7 @@ A crossover edge can span multiple stacked monitors on either side. On the sende
 - `wl-clipboard` (`wl-paste`, `wl-copy`) for clipboard sync
 
 **Receiver (macOS):**
-- macOS Ventura (13.0) or later
+- macOS Ventura (13.0) or later, on Apple Silicon or Intel (release binaries are published for both `arm64` and `x86_64`)
 - Rust toolchain
 - Accessibility permission granted to the receiver app bundle
 
@@ -90,7 +107,7 @@ cargo build --release -p styx-receiver  # on macOS
 
 ## Configuration
 
-Create `~/.config/styx/config.toml` on each machine. A full example is at `dist/config.toml.example`.
+Create `~/.config/styx/config.toml` on each machine. A full example is at `dist/config.toml.example`. Two values are setup-specific: the Mac's LAN IP (find it with `ipconfig getifaddr en0` on the Mac) and the Hyprland output name of your crossover monitor (find it with `hyprctl monitors` on Linux).
 
 **Sender (Linux):**
 
@@ -238,7 +255,7 @@ cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
 - If you rebuilt the receiver, you may need to remove and re-add the Accessibility entry (especially with ad-hoc signing).
 
 **Receiver doesn't start on login:**
-- Verify the launchd agent is loaded: `launchctl print gui/$(id -u)/com.styx.receiver` (the label may differ depending on how the plist was installed — check `~/Library/LaunchAgents/`).
+- Verify the launchd agent is loaded: `launchctl print gui/$(id -u)/com.ghreprimand.styx-receiver` (this is the label the install script registers; confirm it against `~/Library/LaunchAgents/`).
 - Re-run `./dist/macos/install.sh` to reinstall.
 
 **Connection drops repeatedly:**
