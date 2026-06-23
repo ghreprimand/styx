@@ -2,6 +2,18 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## 0.5.4 — 2026-06-23
+
+### Fixed
+
+- **Cursor sticking at the edge of a stacked monitor whose outer edge is set back from the widest display.** When the Mac's return-edge displays were not flush -- e.g. a portrait monitor (right edge at x=1440) stacked above a wider laptop panel (right edge at x=1470) -- the receiver clamped the cursor to the *global* bounding box (x=1469) while testing the return edge against each display's *own* 1 px boundary. On the set-back display the cursor could drift into the strip past its own edge that belongs to no display, where the 1 px "at the edge" test was only satisfied by chance. The result: the cursor appeared to stick at that edge until the user jiggled it back into the band, at which point crossover finally fired. The receiver now decides the return against the specific edge display whose perpendicular span contains the cursor, using that display's own outer boundary, and pins the cursor there -- removing the dead zone so crossover fires the moment the cursor reaches the edge. Flush layouts and the built-in panel are unaffected. Added geometry unit tests covering stacked, set-back, and gap cases.
+
+## 0.5.3 — 2026-04-16
+
+### Changed
+
+- **Monitor matching by description substring.** The sender's `monitors` array now accepts either a Hyprland connector name or a substring of the monitor description (model + serial). Connector names (`HDMI-A-1`, `DP-6`, etc.) can reshuffle across reboots depending on DRM enumeration order, whereas the description is stable. Existing configs using connector names continue to work unchanged.
+
 ## 0.5.2 — 2026-04-15
 
 ### Fixed
