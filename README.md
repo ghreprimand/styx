@@ -94,7 +94,7 @@ A crossover edge can span multiple stacked monitors on either side. On the sende
 - `wl-clipboard` (`wl-paste`, `wl-copy`) for clipboard sync
 
 **Receiver (macOS):**
-- macOS Ventura (13.0) or later, on Apple Silicon or Intel (release binaries are published for both `arm64` and `x86_64`)
+- macOS Ventura (13.0) or later, on Apple Silicon or Intel (a pre-built `arm64` receiver is published with each release; Intel builds from source)
 - Rust toolchain
 - Accessibility permission granted to the receiver app bundle
 

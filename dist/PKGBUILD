@@ -6,6 +6,7 @@ arch=('x86_64')
 url="https://github.com/ghreprimand/styx"
 license=('MIT')
 depends=('glibc' 'wayland' 'gtk4' 'python-gobject')
+optdepends=('wl-clipboard: clipboard sync support')
 makedepends=('rust' 'pkg-config')
 source=("https://github.com/ghreprimand/styx/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
