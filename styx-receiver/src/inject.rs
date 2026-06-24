@@ -38,6 +38,11 @@ pub struct Injector {
     button_state: ButtonState,
     cursor_pos: CGPoint,
     display_bounds: DisplayBounds,
+    /// Every active display rectangle. Used to clamp the cursor to the
+    /// *union* of displays (like macOS does for real HID input) rather than
+    /// to the global bounding box, which can contain phantom regions that
+    /// belong to no display when monitors are not flush.
+    displays: Vec<DisplayBounds>,
     edge_displays: Vec<DisplayBounds>,
     edge_span: EdgeSpan,
     return_edge: Edge,
@@ -110,6 +115,7 @@ impl Injector {
             .map_err(|_| "failed to create CGEventSource")?;
 
         let bounds = compute_display_bounds();
+        let displays = compute_all_displays();
         let edge_displays = compute_edge_displays(return_edge);
         let edge_span = span_of_displays(&edge_displays, return_edge);
         log::info!(
@@ -136,6 +142,7 @@ impl Injector {
             },
             cursor_pos,
             display_bounds: bounds,
+            displays,
             edge_displays,
             edge_span,
             return_edge,
@@ -168,6 +175,7 @@ impl Injector {
             }
         }
         self.display_bounds = compute_display_bounds();
+        self.displays = compute_all_displays();
         self.edge_displays = compute_edge_displays(self.return_edge);
         self.edge_span = span_of_displays(&self.edge_displays, self.return_edge);
         log::info!(
@@ -182,8 +190,24 @@ impl Injector {
     /// Returns true if the cursor hit the return edge.
     pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
         self.declare_user_activity();
-        let clamped_x = (self.cursor_pos.x + dx).clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0);
-        let clamped_y = (self.cursor_pos.y + dy).clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0);
+        // Clamp against the *union* of displays, not the global bounding box.
+        // The bounding box can include phantom regions that belong to no
+        // display (e.g. directly below a short built-in panel when a taller
+        // monitor sits beside it). A cursor parked in such a region never
+        // satisfies the Dock's per-display bottom-edge reveal test, because it
+        // is below the panel's real bottom edge rather than on it. Snapping to
+        // the nearest on-display point reproduces what macOS does for real HID
+        // input. Falls back to the global box only if the display list is empty.
+        let target_x = self.cursor_pos.x + dx;
+        let target_y = self.cursor_pos.y + dy;
+        let (clamped_x, clamped_y) = if self.displays.is_empty() {
+            (
+                target_x.clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0),
+                target_y.clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0),
+            )
+        } else {
+            clamp_to_displays(&self.displays, target_x, target_y)
+        };
 
         // Decide whether the cursor has reached the outer return edge, and
         // pin it to that edge if so. See `resolve_edge_hit` for why this is
@@ -525,6 +549,63 @@ fn span_of_displays(displays: &[DisplayBounds], return_edge: Edge) -> EdgeSpan {
     EdgeSpan { min, max }
 }
 
+/// Snapshot every active display rectangle in CG global coordinates.
+fn compute_all_displays() -> Vec<DisplayBounds> {
+    let Ok(ids) = CGDisplay::active_displays() else {
+        return Vec::new();
+    };
+    ids.into_iter()
+        .map(|id| {
+            let b = CGDisplay::new(id).bounds();
+            DisplayBounds {
+                min_x: b.origin.x,
+                min_y: b.origin.y,
+                max_x: b.origin.x + b.size.width,
+                max_y: b.origin.y + b.size.height,
+            }
+        })
+        .collect()
+}
+
+/// Constrain a tentative cursor position to the union of all active displays,
+/// reproducing the per-display constraint macOS applies to real HID input.
+///
+/// If the point already lies inside some display it is returned unchanged --
+/// this lets the cursor move freely across shared borders between adjacent
+/// displays. Otherwise it is snapped to the nearest in-bounds point across all
+/// displays. This prevents the cursor coming to rest in a phantom region of the
+/// global bounding box that belongs to no display -- e.g. the band directly
+/// below a short built-in panel when a taller display sits beside it. Events
+/// parked in that band never satisfy the Dock's bottom-edge reveal test,
+/// because the cursor is below the panel's real bottom edge rather than on it.
+///
+/// The half-open test (`x < max_x`, `y < max_y`) matches the per-display edge
+/// pinning elsewhere in this file: the reachable maximum on each axis is
+/// `max - 1.0`, i.e. the display's real last row/column.
+fn clamp_to_displays(displays: &[DisplayBounds], x: f64, y: f64) -> (f64, f64) {
+    if displays.is_empty() {
+        return (x, y);
+    }
+    let inside = displays
+        .iter()
+        .any(|d| x >= d.min_x && x < d.max_x && y >= d.min_y && y < d.max_y);
+    if inside {
+        return (x, y);
+    }
+    let mut best = (x, y);
+    let mut best_dist = f64::MAX;
+    for d in displays {
+        let cx = x.clamp(d.min_x, d.max_x - 1.0);
+        let cy = y.clamp(d.min_y, d.max_y - 1.0);
+        let dist = (cx - x).powi(2) + (cy - y).powi(2);
+        if dist < best_dist {
+            best_dist = dist;
+            best = (cx, cy);
+        }
+    }
+    best
+}
+
 fn compute_display_bounds() -> DisplayBounds {
     let mut min_x = f64::MAX;
     let mut min_y = f64::MAX;
@@ -586,10 +667,82 @@ fn swap_alt_meta(code: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_edge_hit, DisplayBounds, Edge};
+    use super::{clamp_to_displays, resolve_edge_hit, DisplayBounds, Edge};
 
     fn db(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> DisplayBounds {
         DisplayBounds { min_x, min_y, max_x, max_y }
+    }
+
+    // The operator's real three-display layout in CG global coordinates:
+    //   built-in (main):  x[0,1470]   y[0,956]    -- short bottom edge
+    //   22" external:     x[-1503,0]  y[0,1002]   -- taller, defines global max_y
+    //   27" portrait:     x[0,1440]   y[-2560,0]  -- stacked above built-in
+    // The global bounding box bottom is 1002, so the OLD global clamp let the
+    // cursor sail to y=1001 -- 45px below the built-in's real bottom (956),
+    // into a phantom band that belongs to no display. The Dock never revealed.
+    fn real_layout() -> Vec<DisplayBounds> {
+        vec![
+            db(0.0, 0.0, 1470.0, 956.0),      // built-in
+            db(-1503.0, 0.0, 0.0, 1002.0),    // 22" external (left)
+            db(0.0, -2560.0, 1440.0, 0.0),    // 27" portrait (above)
+        ]
+    }
+
+    // THE BUG: pushing the cursor to the bottom of the built-in overshoots to
+    // the global ceiling (y=1001). That point is on no display, so it must be
+    // snapped back onto the built-in's real bottom row (y=955), where the Dock
+    // can finally see it. x is unchanged because it stays within the built-in.
+    #[test]
+    fn builtin_bottom_overshoot_snaps_to_real_edge() {
+        let d = real_layout();
+        let (x, y) = clamp_to_displays(&d, 500.0, 1001.0);
+        assert_eq!((x, y), (500.0, 955.0));
+    }
+
+    // The left external worked before because its real bottom (1002) equals the
+    // global max_y. Confirm the fix keeps it working: a point on its true bottom
+    // row is inside the display and passes through untouched.
+    #[test]
+    fn external_bottom_still_reachable() {
+        let d = real_layout();
+        let (x, y) = clamp_to_displays(&d, -700.0, 1001.0);
+        assert_eq!((x, y), (-700.0, 1001.0));
+    }
+
+    // A point comfortably inside the built-in is never perturbed -- the clamp
+    // must not interfere with ordinary motion.
+    #[test]
+    fn interior_point_untouched() {
+        let d = real_layout();
+        assert_eq!(clamp_to_displays(&d, 700.0, 400.0), (700.0, 400.0));
+    }
+
+    // The cursor must move freely across the shared x=0 border between the
+    // built-in and the left external at a y both share, with no snapping.
+    #[test]
+    fn crosses_shared_border_freely() {
+        let d = real_layout();
+        assert_eq!(clamp_to_displays(&d, -1.0, 400.0), (-1.0, 400.0)); // on external
+        assert_eq!(clamp_to_displays(&d, 0.0, 400.0), (0.0, 400.0));   // on built-in
+    }
+
+    // Overshooting below the portrait (its bottom is y=0) while horizontally
+    // over the built-in region must snap onto the built-in, not strand the
+    // cursor in the seam. Here (700, -5) is just above the built-in; (700, 5)
+    // is inside it. Confirm a point just below the portrait's bottom but inside
+    // the built-in's x-range stays put because it is already on the built-in.
+    #[test]
+    fn portrait_to_builtin_seam_has_no_deadzone() {
+        let d = real_layout();
+        // y=10 is inside the built-in (x in [0,1470)) -> untouched.
+        assert_eq!(clamp_to_displays(&d, 700.0, 10.0), (700.0, 10.0));
+    }
+
+    // Empty display list falls back to identity (caller then uses the global
+    // box). Guards the degenerate no-display path.
+    #[test]
+    fn empty_displays_is_identity() {
+        assert_eq!(clamp_to_displays(&[], 12.0, 34.0), (12.0, 34.0));
     }
 
     // Mirrors a real stacked layout reported in the field: a portrait
