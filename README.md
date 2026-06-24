@@ -8,17 +8,17 @@ Styx is narrow in scope by design. It does one thing: send keyboard and mouse in
 
 A minimal Linux-to-Mac setup, start to finish. Each step links to a fuller section below.
 
+Install matching versions on both machines — the sender and receiver share a wire protocol and must be upgraded together.
+
 1. **Find your two values.**
    - Mac's LAN IP: run `ipconfig getifaddr en0` on the Mac (Wi-Fi is usually `en0`, Ethernet often `en1`).
    - Linux crossover monitor name: run `hyprctl monitors` on Linux and note the `Monitor <name>` line (e.g. `DP-1`).
-2. **Build both binaries** (see [Building](#building)).
-   - Linux: `cargo build --release -p styx-sender`
-   - Mac: `cargo build --release -p styx-receiver`
-3. **Write `~/.config/styx/config.toml` on each machine** (see [Configuration](#configuration)).
+2. **Install the receiver on the Mac** (see [Installation › Receiver (macOS)](#receiver-macos)): create the `styx-cert` signing certificate once, then run `./dist/macos/install.sh`. The script builds and installs the app bundle for you.
+3. **Install the sender on Linux** (see [Installation › Sender (Linux)](#sender-linux)): build it and enable the `styx-sender` user service.
+4. **Write `~/.config/styx/config.toml` on each machine** (see [Configuration](#configuration)).
    - Linux: set `receiver_host` to the Mac's IP, `monitor` to the output name, `edge` to the side facing the Mac.
    - Mac: set `return_edge` to the side facing Linux. Keep the sender's `receiver_port` and the receiver's `listen_port` equal (4242 by convention).
-4. **Install and start the receiver on the Mac** (see [Installation › macOS](#macos)): run `./dist/macos/install.sh`, then grant Accessibility permission under System Settings › Privacy & Security › Accessibility for **Styx Receiver.app**.
-5. **Start the sender on Linux**: `systemctl --user enable --now styx-sender`, or run `RUST_LOG=info ./styx-sender` directly.
+5. **Grant and start.** On the Mac, grant Accessibility permission under System Settings › Privacy & Security › Accessibility for **Styx Receiver.app**. On Linux, start the sender with `systemctl --user enable --now styx-sender`.
 6. **Cross over.** Move the cursor to the configured edge of the Linux monitor — it appears on the Mac. Move to the Mac's return edge to come back.
 
 ## Why This Exists
@@ -192,60 +192,95 @@ See [docs/sender-gui.md](docs/sender-gui.md) for installation and behavior detai
 
 ## Installation
 
-### Linux (Arch Linux)
+Styx is two binaries: the **receiver** runs on the Mac, the **sender** runs on the Linux machine. Install both, and keep them on the same version — they share a wire protocol and are upgraded together. Each side has one recommended path below; less common methods follow under **Alternatives**.
 
-A PKGBUILD, systemd user service, and sender GUI desktop entry are provided in `dist/`. The sender package installs both `styx-sender` and `styx-sender-gui`; after installation, the GUI appears in application launchers as **Styx Sender**.
+### Receiver (macOS)
 
-```
-systemctl --user enable --now styx-sender
-```
+The recommended method is the install script. macOS only grants Accessibility permission (required to inject input) to a stable, signed application identity, so the receiver must be installed as a code-signed `.app` bundle — the script handles that end to end.
 
-The GUI can be opened from the launcher or run directly:
-
-```
-styx-sender-gui
-```
-
-### macOS
-
-The recommended installation method is the install script, which builds the receiver, creates a signed `.app` bundle, and configures launchd for autostart:
-
-```
-./dist/macos/install.sh
-```
-
-The script will:
-1. Build `styx-receiver` in release mode.
-2. Create `/Applications/Styx Receiver.app` with the binary and metadata.
-3. Sign the app with a `styx-cert` code signing certificate (falls back to ad-hoc if not found).
-4. Install a launchd agent that starts the receiver on login and restarts on failure.
-
-After installation, grant Accessibility permission:
-1. Open **System Settings > Privacy & Security > Accessibility**.
-2. Click the `+` button and add `/Applications/Styx Receiver.app`.
-3. Enable the toggle.
-
-The receiver will start automatically on login. Logs are at `/tmp/styx-receiver.stderr.log`.
-
-#### Code Signing Certificate
-
-For Accessibility permission to persist across rebuilds, create a self-signed code signing certificate:
+**1. Create the signing certificate (once).** This gives the app a stable identity so the Accessibility grant survives rebuilds:
 
 1. Open **Keychain Access**.
 2. Go to **Keychain Access > Certificate Assistant > Create a Certificate**.
 3. Name: `styx-cert`, Identity Type: **Self Signed Root**, Certificate Type: **Code Signing**.
 4. Create the certificate.
 
-Without `styx-cert`, the install script falls back to ad-hoc signing. Ad-hoc signatures change on every build, so you may need to re-grant Accessibility permission after each rebuild.
+If you skip this, the script falls back to ad-hoc signing, whose signature changes on every build — so you would have to re-grant Accessibility after each rebuild.
 
-### From Source
+**2. Run the install script:**
 
 ```
-cargo install --git https://github.com/ghreprimand/styx styx-sender   # Linux
-cargo install --git https://github.com/ghreprimand/styx styx-receiver  # macOS
+./dist/macos/install.sh
 ```
 
-**Pre-built binaries** for Linux (x86_64) and macOS (ARM64, x86_64) are published on the [Releases](https://github.com/ghreprimand/styx/releases) page.
+It builds `styx-receiver` in release mode, creates `/Applications/Styx Receiver.app`, signs it with `styx-cert`, and installs a launchd agent that starts the receiver on login and restarts it on failure.
+
+**3. Grant Accessibility permission:**
+
+1. Open **System Settings > Privacy & Security > Accessibility**.
+2. Click `+` and add `/Applications/Styx Receiver.app`.
+3. Enable the toggle.
+
+The receiver starts automatically on login. Logs are at `/tmp/styx-receiver.stderr.log`. To upgrade later, pull the repo and re-run the script — the stable `styx-cert` identity means you will not need to re-grant Accessibility.
+
+<details>
+<summary><strong>Alternatives (macOS)</strong></summary>
+
+- **Homebrew formula.** A formula is maintained in-repo at `dist/homebrew/styx-receiver.rb`:
+
+  ```
+  brew install --formula ./dist/homebrew/styx-receiver.rb
+  ```
+
+  This installs the `styx-receiver` binary to Homebrew's prefix but does **not** create the `.app` bundle or launchd agent, so it does not autostart and cannot reliably hold the Accessibility grant. Use it only if you intend to run the receiver manually; the install script is the supported path for normal use.
+
+- **Pre-built binary.** Each [release](https://github.com/ghreprimand/styx/releases) publishes an Apple Silicon (`arm64`) `styx-receiver`. It is a bare binary with the same `.app`/Accessibility caveats as the Homebrew formula. (No Intel `x86_64` macOS binary is published; build from source on Intel.)
+</details>
+
+### Sender (Linux)
+
+Requires the Wayland, evdev, and clipboard dependencies listed under [Requirements](#requirements), plus a Rust toolchain.
+
+**Arch Linux** — build and install the package, which provides `styx-sender`, the `styx-sender-gui` settings tool, and the systemd user service:
+
+```
+cd dist && makepkg -si
+systemctl --user enable --now styx-sender
+```
+
+The GUI appears in application launchers as **Styx Sender**, or run `styx-sender-gui` directly.
+
+**Other distributions** — build the binary, install it to the path the service expects, install the user service, and enable it:
+
+```
+cargo build --release -p styx-sender
+sudo install -Dm755 target/release/styx-sender /usr/bin/styx-sender
+mkdir -p ~/.config/systemd/user
+cp dist/styx-sender.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now styx-sender
+```
+
+The bundled `styx-sender.service` runs `/usr/bin/styx-sender`; if you install the binary elsewhere, edit `ExecStart` to match.
+
+<details>
+<summary><strong>Alternatives (Linux)</strong></summary>
+
+- **Run directly without a service** (for testing):
+
+  ```
+  cargo build --release -p styx-sender
+  RUST_LOG=info ./target/release/styx-sender
+  ```
+
+- **`cargo install`** drops the binary in `~/.cargo/bin` but installs no systemd unit, so it will not autostart:
+
+  ```
+  cargo install --git https://github.com/ghreprimand/styx styx-sender
+  ```
+
+- **Pre-built binary.** Each [release](https://github.com/ghreprimand/styx/releases) publishes a Linux `x86_64` `styx-sender`; install it to `/usr/bin/styx-sender` and set up the service as in the "Other distributions" steps above.
+</details>
 
 ## Troubleshooting
 
