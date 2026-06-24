@@ -2,6 +2,12 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## 0.5.5 — 2026-06-24
+
+### Fixed
+
+- **Dock (and other bottom/edge reveals) failing to trigger on a shorter display when a taller display sits beside it.** The receiver moved its injected cursor by clamping to the *global bounding box* of all displays rather than to the *union* of the actual display rectangles. When displays are not the same height -- e.g. a built-in laptop panel (bottom edge at y=956) next to a taller external (bottom edge at y=1002) -- the global box bottom is the taller value (1002). Pushing the cursor to the bottom of the shorter panel let it sail ~45 px past the panel's real bottom edge into a phantom strip of the bounding box that belongs to no display. macOS accepts that injected coordinate because it lies inside the bounding rectangle, so the logical cursor came to rest *below* the panel rather than on its bottom row -- and the Dock's per-display bottom-edge reveal (which watches only the panel's real last few rows) never fired. The symptom: with auto-hide on, the Dock revealed only when the cursor happened to stop a few pixels short of the bottom, and essentially never when pushed fully down; a display whose bottom edge coincides with the global maximum worked every time by coincidence. A hardware touchpad was unaffected because macOS constrains real HID input to the union of displays, not the bounding box. The receiver now applies that same union constraint to injected motion: a target already on some display passes through unchanged (so the cursor still crosses shared borders freely), otherwise it is snapped to the nearest point that lies on a real display. This removes the phantom dead band on every non-flush multi-display layout, independent of `return_edge`, display count, or arrangement. Added geometry unit tests covering the overshoot-snaps-to-real-edge case, the taller-display-still-reachable case, free border crossing, and interior no-op. This is the bottom/edge analogue of the return-edge dead-zone fix in 0.5.4; that fix covered only the configured return edge, this one covers ordinary motion against every edge.
+
 ## 0.5.4 — 2026-06-23
 
 ### Fixed
