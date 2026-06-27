@@ -65,6 +65,30 @@ def keyboard_devices():
     return devices
 
 
+def keyboard_device_label(path):
+    """Human-friendly label for a /dev/input/by-id keyboard symlink.
+
+    Derives a readable model name from the by-id filename (e.g.
+    "usb-SONiX_QK75_KB-event-kbd" -> "SONiX QK75 KB") and appends the
+    resolved event node so two devices with similar names stay
+    distinguishable.
+    """
+    name = Path(path).name
+    model = name
+    if model.startswith("usb-"):
+        model = model[len("usb-"):]
+    for suffix in ("-event-kbd", "-kbd"):
+        if model.endswith(suffix):
+            model = model[: -len(suffix)]
+            break
+    model = model.replace("_", " ").strip() or name
+    try:
+        node = os.path.basename(os.path.realpath(path))
+    except OSError:
+        node = ""
+    return f"{model}  ({node})" if node else model
+
+
 def load_config(path):
     path = expand_path(path)
     if not path.exists():
@@ -173,7 +197,7 @@ class SenderGui(Gtk.Application):
             self.edge_combo.append_text(edge)
         self.edge_combo.set_active(0)
         self.monitors_view = self.text_view(height=86)
-        self.keyboard_entry = Gtk.Entry()
+        self.keyboard_combo = Gtk.ComboBoxText()
         self.active_spin = Gtk.SpinButton.new_with_range(100, 60000, 100)
         self.idle_spin = Gtk.SpinButton.new_with_range(100, 300000, 100)
         self.miss_spin = Gtk.SpinButton.new_with_range(1, 100, 1)
@@ -182,7 +206,7 @@ class SenderGui(Gtk.Application):
         self.add_row(grid, 1, "Receiver port", self.port_spin)
         self.add_row(grid, 2, "Linux crossover edge", self.edge_combo)
         self.add_row(grid, 3, "Linux crossover monitors", self.monitors_view)
-        self.add_row(grid, 4, "Keyboard device", self.keyboard_entry)
+        self.add_row(grid, 4, "Keyboard device", self.keyboard_combo)
         self.add_row(grid, 5, "Active heartbeat ms", self.active_spin)
         self.add_row(grid, 6, "Idle heartbeat ms", self.idle_spin)
         self.add_row(grid, 7, "Miss threshold", self.miss_spin)
@@ -272,7 +296,7 @@ class SenderGui(Gtk.Application):
             edge = str(sender.get("edge", "left")).lower()
             self.edge_combo.set_active(EDGES.index(edge) if edge in EDGES else 0)
             self.set_buffer_text(self.monitors_view, "\n".join(monitors))
-            self.keyboard_entry.set_text(str(sender.get("keyboard_device", "")))
+            self.populate_keyboard_combo(str(sender.get("keyboard_device", "")).strip())
             self.active_spin.set_value(int(heartbeat.get("active_interval_ms", 1000)))
             self.idle_spin.set_value(int(heartbeat.get("idle_interval_ms", 5000)))
             self.miss_spin.set_value(int(heartbeat.get("miss_threshold", 3)))
@@ -294,7 +318,7 @@ class SenderGui(Gtk.Application):
                 "receiver_port": int(self.port_spin.get_value()),
                 "monitors": monitors,
                 "edge": edge,
-                "keyboard_device": self.keyboard_entry.get_text().strip(),
+                "keyboard_device": self.selected_keyboard_device(),
             },
             {
                 "active_interval_ms": int(self.active_spin.get_value()),
@@ -356,13 +380,40 @@ class SenderGui(Gtk.Application):
         self.set_buffer_text(self.monitors_view, "\n".join(selected))
         self.set_status("Linux crossover monitors updated")
 
-    def detect_keyboard(self):
+    def populate_keyboard_combo(self, selected=""):
+        """Fill the keyboard dropdown with every detected device.
+
+        Each entry's id is the /dev/input/by-id path and its visible
+        label is a friendly model name plus the resolved event node.
+        A leading "(auto-detect)" row maps to an empty path so the
+        sender falls back to its own detection. If the configured
+        device isn't currently present (e.g. unplugged), it's still
+        added so the saved value is preserved and visible.
+        """
+        combo = self.keyboard_combo
+        combo.remove_all()
+        combo.append("", "(auto-detect — first device found)")
         devices = keyboard_devices()
-        if devices:
-            self.keyboard_entry.set_text(devices[0])
-            self.set_status("Keyboard device set")
-        else:
+        for path in devices:
+            combo.append(path, keyboard_device_label(path))
+        if selected and selected not in devices:
+            combo.append(selected, f"{keyboard_device_label(selected)} — not connected")
+        combo.set_active_id(selected if selected else "")
+        return devices
+
+    def selected_keyboard_device(self):
+        return self.keyboard_combo.get_active_id() or ""
+
+    def detect_keyboard(self):
+        selected = self.selected_keyboard_device()
+        devices = self.populate_keyboard_combo(selected)
+        if not devices:
             self.set_status("No keyboard device found")
+        elif len(devices) == 1:
+            self.keyboard_combo.set_active_id(devices[0])
+            self.set_status("1 keyboard device found")
+        else:
+            self.set_status(f"{len(devices)} keyboard devices found — pick one from the dropdown")
 
 
 def main():
