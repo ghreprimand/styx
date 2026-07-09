@@ -394,4 +394,8 @@ Styx's layer-shell edge detection approach is inspired by [lan-mouse](https://gi
 
 ## License
 
-MIT
+GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Styx's Wayland input-capture code (`styx-sender/src/capture.rs`) is derived from
+[lan-mouse](https://github.com/feschber/lan-mouse) by Ferdinand Schober, which is
+licensed under GPL-3.0. Styx is therefore distributed under the same license.
