@@ -1,3 +1,12 @@
+// Portions of this file (the wlr-layer-shell input-capture logic, Wayland
+// Dispatch handlers, and the pointer grab/ungrab and event-queue plumbing)
+// are derived from lan-mouse (input-capture/src/layer_shell.rs) by
+// Ferdinand Schober, licensed under GPL-3.0-or-later.
+// Upstream: https://github.com/feschber/lan-mouse
+//
+// This file, and styx as a whole, is distributed under GPL-3.0-or-later.
+// See the LICENSE file at the repository root.
+
 use std::{
     collections::VecDeque,
     env,
