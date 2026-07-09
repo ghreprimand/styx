@@ -2,6 +2,12 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## 0.5.7 — 2026-07-09
+
+### Changed
+
+- **License changed from MIT to GPL-3.0-or-later.** The sender's Wayland input-capture code (`styx-sender/src/capture.rs`) is a derivative work of [lan-mouse](https://github.com/feschber/lan-mouse) by Ferdinand Schober, which is licensed under GPL-3.0. Distributing styx under MIT was incompatible with that license, so the project is now GPL-3.0-or-later throughout. There are no functional code changes in this release; it exists to correct the license across the source, packaging manifests, and release artifacts. Attribution to lan-mouse has been added to the derived source file and the README.
+
 ## 0.5.6 — 2026-06-27
 
 ### Changed
