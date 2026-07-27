@@ -131,6 +131,21 @@ the wrong place — proportionally offset, which looks like drift rather than an
 obvious error. The receiver logs the computed extent at startup; check it
 against `hyprctl monitors` if the cursor lands oddly.
 
+On Hyprland, generate the blocks rather than doing the arithmetic by hand.
+This handles both scaling and rotation (90°/270° transforms swap width and
+height):
+
+```
+hyprctl monitors -j | jq -r '.[] |
+  (if .transform == 1 or .transform == 3
+   then {w: .height, h: .width}
+   else {w: .width,  h: .height} end) as $d |
+  "[[receiver.display]]\nx = \(.x)\ny = \(.y)\nwidth = \(($d.w / .scale) | round)\nheight = \(($d.h / .scale) | round)\n"'
+```
+
+On other compositors, `wlr-randr` (wlroots) or `xrandr` (X11) report the same
+logical geometry; transcribe position and size the same way.
+
 `swap_alt_cmd` is accepted but ignored, with a warning. It exists to reconcile
 PC and Mac modifier positions; both ends of a Linux-to-Linux link use the same
 evdev codes.
