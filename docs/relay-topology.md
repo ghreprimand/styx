@@ -176,9 +176,40 @@ should be sequenced last for that reason.
 
 Mechanism: a `CGEventTap` created with `CGEventTapOptions::Default` (the
 suppressing variant; `ListenOnly` cannot swallow events) at
-`CGEventTapLocation::HID`, head-inserted. Accessibility permission is already
-granted to `Styx Receiver.app`, which is the same permission a suppressing tap
-requires, so there is no new permission prompt.
+`CGEventTapLocation::HID`, head-inserted.
+
+### Permissions: a second TCC grant is required
+
+An earlier draft of this document claimed the existing Accessibility grant
+covers the tap and no new prompt appears. **That is wrong.** Accessibility
+(`kTCCServicePostEvent`) authorises *posting* events, which is what the
+receiver does today. Creating a tap that *observes* events system-wide is a
+distinct TCC service, Input Monitoring (`kTCCServiceListenEvent`), granted
+separately in System Settings › Privacy & Security › **Input Monitoring**. A
+suppressing tap generally needs both: Input Monitoring to see events,
+Accessibility to alter or swallow them.
+
+Consequences for packaging and docs, none of them hard but all of them needing
+handling:
+
+- Origin mode triggers a **second permission prompt** the first time the tap is
+  created ("would like to receive keystrokes from any application"). The
+  install script and README currently document one grant; they will need a
+  second, and the prompt appears at first *use*, not at install.
+- TCC decisions are bound to code identity, so a rebuild that changes the
+  signature can invalidate the grant. Styx already solved this for
+  Accessibility with the stable `styx-cert` identity created in
+  `dist/macos/install.sh`, and the same identity covers Input Monitoring — but
+  the "re-grant after every rebuild" trap returns for anyone on ad-hoc signing.
+- **A non-null tap is not necessarily a working tap.** Without Input
+  Monitoring, `CGEventTapCreate` can return a valid-looking Mach port that
+  never delivers events — indistinguishable at construction time from a healthy
+  tap. The implementation must verify tap health at runtime and log clearly, or
+  this failure mode presents as "origin mode does nothing" with no diagnostic.
+
+Because this is a user-visible setup step rather than a code problem, it is a
+further argument for sequencing origin mode last: steps 1–3 need no new
+permissions at all.
 
 While capturing:
 
@@ -212,16 +243,73 @@ input if the stamp filter ever has a gap. Belt and braces.
 
 ### Known limitations of tap-based capture
 
-Worth documenting up front so they are not rediscovered as bugs:
+These are properties of the mechanism, not bugs to be fixed later. All three
+are scoped to **origin mode only** — they cannot affect `Receiving` or
+`Forwarding`, because on those paths the keyboard is grabbed by the
+workstation's evdev grab and macOS never sees a physical keystroke at all. The
+existing workstation↔Mac setup is untouched by everything in this section.
 
-- **Secure input.** While a password field has secure event input enabled, taps
-  receive nothing. Keystrokes typed at that moment will not reach the laptop.
-  There is no workaround; this is the OS enforcing its threat model.
-- **Reserved system combinations.** Some system-level shortcuts are handled
-  above the tap and cannot be suppressed or forwarded.
-- **Tap disabling.** macOS disables a tap that is too slow to respond, emitting
-  `kCGEventTapDisabledByTimeout`. The callback must be non-blocking (push to a
-  channel, never await) and the tap must be re-enabled on that event.
+#### Secure event input
+
+`EnableSecureEventInput` is the macOS facility that lets a process protect
+keystrokes from interception. Apple's technical note on it names event-tap
+installation explicitly as one of the interception techniques it is designed to
+defeat, so this is the OS working as intended rather than a gap to route
+around. It is triggered by password fields in browsers and system dialogs, and
+by Terminal's **Secure Keyboard Entry** setting.
+
+The failure mode is what makes this worth understanding rather than merely
+noting. Secure input is **system-wide and focus-driven**, not scoped to the
+field being typed into. In origin mode the cursor is over on the laptop, but
+the Mac still has some frontmost application, and if that application has
+secure input active then the tap silently receives nothing. The user is typing
+into the laptop and the keystrokes vanish.
+
+Signature to recognise: **mouse continues working, keyboard stops.** Secure
+input covers keyboard events only, so pointer motion relays normally while
+every keystroke disappears. Without knowing the mechanism this looks exactly
+like a stuck-key or dropped-connection bug, and would be debugged in entirely
+the wrong direction.
+
+The persistent case is worse than the transient one. A focused password field
+clears when focus moves. Terminal with Secure Keyboard Entry enabled holds
+secure input for as long as it is frontmost, so a user with that setting on
+would find origin mode's keyboard dead every time Terminal has focus, with no
+error anywhere.
+
+Mitigation — detection, not circumvention. `IsSecureEventInputEnabled()`
+(Carbon/HIToolbox) reports the current state; Hammerspoon exposes exactly this
+call for exactly this reason. Poll it while origin mode is active and log a
+clear line when it flips on. Converting a silent, misleading failure into a
+legible one is the whole of the available fix.
+
+#### Reserved system combinations
+
+Some system-level shortcuts are handled above the tap and can be neither
+suppressed nor forwarded. Practical effect: a handful of key combinations will
+act on the Mac instead of relaying to the laptop. Minor, but it means origin
+mode cannot promise full keyboard fidelity the way the evdev path can — evdev's
+`EVIOCGRAB` takes the device before the compositor, which is strictly more
+complete than anything a tap can do.
+
+#### Tap disabling
+
+macOS disables a tap whose callback is too slow, notifying via
+`kCGEventTapDisabledByTimeout`; user input can also disable a tap
+(`kCGEventTapDisabledByUserInput`). Both constants are already in the
+`core-graphics` 0.24 enum as `CGEventType::TapDisabledByTimeout` and
+`TapDisabledByUserInput`, so they arrive through the normal callback path.
+
+Two implementation requirements follow. The callback must never block — push
+onto a channel and return, never await inside it — because a slow callback is
+precisely what triggers the disable. And the tap must be re-enabled on receipt
+of either constant; `CGEventTap::enable()` exists in the crate for this.
+
+One crate gap: `enable()` hardcodes `CGEventTapEnable(port, true)` and there is
+no disable path. Since the design calls for disabling the tap outside `Idle` and
+`Originating`, styx needs its own `extern "C"` declaration for
+`CGEventTapEnable` to pass `false`. `CGEventTap::mach_port` is a public field,
+so this is a few lines rather than a fork.
 
 ## Clipboard in a three-node chain
 
