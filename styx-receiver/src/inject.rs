@@ -13,6 +13,10 @@ use core_graphics::geometry::CGPoint;
 
 use styx_keymap;
 
+use crate::geometry::{
+    self, DisplayBounds, Edge, EdgeSpan, clamp_to_displays, resolve_edge_hit, span_of_displays,
+};
+
 const K_IOPM_USER_ACTIVE_LOCAL: u32 = 0;
 
 #[link(name = "IOKit", kind = "framework")]
@@ -22,14 +26,6 @@ unsafe extern "C" {
         user_type: u32,
         assertion_id: *mut u32,
     ) -> i32;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edge {
-    Left,
-    Right,
-    Top,
-    Bottom,
 }
 
 pub struct Injector {
@@ -88,21 +84,6 @@ struct ButtonState {
     left: ButtonTracker,
     right: ButtonTracker,
     middle: ButtonTracker,
-}
-
-#[derive(Clone)]
-struct DisplayBounds {
-    min_x: f64,
-    min_y: f64,
-    max_x: f64,
-    max_y: f64,
-}
-
-/// The span along the return edge (the monitor that owns that edge).
-#[derive(Clone)]
-struct EdgeSpan {
-    min: f64,
-    max: f64,
 }
 
 const BTN_LEFT: u32 = 0x110;
@@ -387,166 +368,30 @@ impl Injector {
     }
 
     /// Place the cursor at the entry edge, at the given pixel distance from
-    /// the bottom of the combined edge span. Clamps to the span and picks
-    /// the specific edge display that contains the target position (or the
-    /// nearest one if it falls in a gap between stacked displays).
+    /// the bottom of the combined edge span. Delegates the geometry to
+    /// `geometry::place_from_bottom`; leaves the cursor untouched when there
+    /// are no edge displays to place it on.
     pub fn place_cursor_from_bottom(&mut self, from_bottom: f64) {
-        if self.edge_displays.is_empty() {
-            return;
+        if let Some((x, y)) = geometry::place_from_bottom(
+            &self.edge_displays,
+            self.edge_span,
+            self.return_edge,
+            from_bottom,
+        ) {
+            self.cursor_pos = CGPoint::new(x, y);
         }
-        let pos = (self.edge_span.max - from_bottom).clamp(self.edge_span.min, self.edge_span.max);
-        let target = self.edge_displays.iter().find(|d| {
-            match self.return_edge {
-                Edge::Left | Edge::Right => pos >= d.min_y && pos < d.max_y,
-                Edge::Top | Edge::Bottom => pos >= d.min_x && pos < d.max_x,
-            }
-        }).or_else(|| self.edge_displays.iter().min_by(|a, b| {
-            let ma = match self.return_edge {
-                Edge::Left | Edge::Right => (a.min_y + a.max_y) * 0.5,
-                Edge::Top | Edge::Bottom => (a.min_x + a.max_x) * 0.5,
-            };
-            let mb = match self.return_edge {
-                Edge::Left | Edge::Right => (b.min_y + b.max_y) * 0.5,
-                Edge::Top | Edge::Bottom => (b.min_x + b.max_x) * 0.5,
-            };
-            (ma - pos).abs().partial_cmp(&(mb - pos).abs()).unwrap()
-        })).unwrap();
-        let (x, y) = match self.return_edge {
-            Edge::Right => (target.max_x - 2.0, pos.clamp(target.min_y, target.max_y - 1.0)),
-            Edge::Left  => (target.min_x + 2.0, pos.clamp(target.min_y, target.max_y - 1.0)),
-            Edge::Bottom => (pos.clamp(target.min_x, target.max_x - 1.0), target.max_y - 2.0),
-            Edge::Top    => (pos.clamp(target.min_x, target.max_x - 1.0), target.min_y + 2.0),
-        };
-        self.cursor_pos = CGPoint::new(x, y);
     }
 
     /// Returns the cursor's pixel distance from the bottom of the edge monitor
     /// and the edge monitor's total height.
     pub fn cursor_from_bottom(&self) -> (f64, f64) {
-        let pos = match self.return_edge {
-            Edge::Left | Edge::Right => self.cursor_pos.y,
-            Edge::Top | Edge::Bottom => self.cursor_pos.x,
-        };
-        let from_bottom = (self.edge_span.max - pos).clamp(0.0, self.edge_span.max - self.edge_span.min);
-        let height = self.edge_span.max - self.edge_span.min;
-        (from_bottom, height)
+        geometry::from_bottom_of(
+            self.edge_span,
+            self.return_edge,
+            self.cursor_pos.x,
+            self.cursor_pos.y,
+        )
     }
-}
-
-/// Given the cursor's post-clamp position and the set of displays that own
-/// the return edge, decide whether the cursor has reached the outer return
-/// edge. If it has, pin the returned coordinate to that edge display's OWN
-/// outer boundary and report `true`.
-///
-/// Detection is done against the specific edge display whose perpendicular
-/// span contains the cursor -- not against the global bounding box. This
-/// matters when the edge displays are not flush. Example: a portrait
-/// monitor (right edge x=1440) stacked above a laptop panel (right edge
-/// x=1470). The caller's global clamp caps x at 1469, which is past the
-/// portrait's right edge, so while the cursor is on the portrait it can
-/// drift into the x in (1440, 1469] band that belongs to no display. There
-/// a fixed 1 px "at the edge" test can only be satisfied by chance, so the
-/// cursor appears to stick until the user jitters it back into that band.
-/// Pinning to the edge display's own boundary removes the dead zone and
-/// makes the crossover fire the moment the cursor reaches the portrait's
-/// edge. Detecting per-display also keeps a non-edge monitor that merely
-/// sits at the extreme x from falsely triggering return, and lets any of
-/// several stacked edge displays send the signal.
-fn resolve_edge_hit(
-    edge_displays: &[DisplayBounds],
-    return_edge: Edge,
-    x: f64,
-    y: f64,
-) -> (f64, f64, bool) {
-    let mut nx = x;
-    let mut ny = y;
-    let hit = edge_displays
-        .iter()
-        .find(|d| match return_edge {
-            Edge::Right | Edge::Left => ny >= d.min_y && ny < d.max_y,
-            Edge::Top | Edge::Bottom => nx >= d.min_x && nx < d.max_x,
-        })
-        .map(|d| match return_edge {
-            Edge::Right => {
-                if nx >= d.max_x - 1.0 { nx = d.max_x - 1.0; true } else { false }
-            }
-            Edge::Left => {
-                if nx <= d.min_x { nx = d.min_x; true } else { false }
-            }
-            Edge::Bottom => {
-                if ny >= d.max_y - 1.0 { ny = d.max_y - 1.0; true } else { false }
-            }
-            Edge::Top => {
-                if ny <= d.min_y { ny = d.min_y; true } else { false }
-            }
-        })
-        .unwrap_or(false);
-    (nx, ny, hit)
-}
-
-/// How close two monitor edges must be (in points) to count as occupying
-/// the same return-edge column. Handles displays whose outer edges do not
-/// line up exactly -- e.g. a portrait monitor stacked above a laptop
-/// display where both face the sender on their right side.
-const EDGE_ALIGN_TOLERANCE: f64 = 64.0;
-
-/// Return the bounds of every active display that sits at the return
-/// edge. For `Edge::Right` that is every display whose right edge is
-/// within `EDGE_ALIGN_TOLERANCE` of the overall rightmost x; analogously
-/// for the other edges.
-fn compute_edge_displays(return_edge: Edge) -> Vec<DisplayBounds> {
-    let Ok(ids) = CGDisplay::active_displays() else {
-        return Vec::new();
-    };
-    let mut all: Vec<DisplayBounds> = Vec::new();
-    for id in ids {
-        let b = CGDisplay::new(id).bounds();
-        all.push(DisplayBounds {
-            min_x: b.origin.x,
-            min_y: b.origin.y,
-            max_x: b.origin.x + b.size.width,
-            max_y: b.origin.y + b.size.height,
-        });
-    }
-    if all.is_empty() {
-        return all;
-    }
-    let extreme = match return_edge {
-        Edge::Right => all.iter().map(|d| d.max_x).fold(f64::MIN, f64::max),
-        Edge::Left => all.iter().map(|d| d.min_x).fold(f64::MAX, f64::min),
-        Edge::Bottom => all.iter().map(|d| d.max_y).fold(f64::MIN, f64::max),
-        Edge::Top => all.iter().map(|d| d.min_y).fold(f64::MAX, f64::min),
-    };
-    all.into_iter()
-        .filter(|d| {
-            let own = match return_edge {
-                Edge::Right => d.max_x,
-                Edge::Left => d.min_x,
-                Edge::Bottom => d.max_y,
-                Edge::Top => d.min_y,
-            };
-            (own - extreme).abs() <= EDGE_ALIGN_TOLERANCE
-        })
-        .collect()
-}
-
-/// Union the Y span (left/right edges) or X span (top/bottom edges) over
-/// a set of edge-owning displays.
-fn span_of_displays(displays: &[DisplayBounds], return_edge: Edge) -> EdgeSpan {
-    if displays.is_empty() {
-        return EdgeSpan { min: 0.0, max: 1080.0 };
-    }
-    let mut min = f64::MAX;
-    let mut max = f64::MIN;
-    for d in displays {
-        let (a, b) = match return_edge {
-            Edge::Left | Edge::Right => (d.min_y, d.max_y),
-            Edge::Top | Edge::Bottom => (d.min_x, d.max_x),
-        };
-        if a < min { min = a; }
-        if b > max { max = b; }
-    }
-    EdgeSpan { min, max }
 }
 
 /// Snapshot every active display rectangle in CG global coordinates.
@@ -567,72 +412,14 @@ fn compute_all_displays() -> Vec<DisplayBounds> {
         .collect()
 }
 
-/// Constrain a tentative cursor position to the union of all active displays,
-/// reproducing the per-display constraint macOS applies to real HID input.
-///
-/// If the point already lies inside some display it is returned unchanged --
-/// this lets the cursor move freely across shared borders between adjacent
-/// displays. Otherwise it is snapped to the nearest in-bounds point across all
-/// displays. This prevents the cursor coming to rest in a phantom region of the
-/// global bounding box that belongs to no display -- e.g. the band directly
-/// below a short built-in panel when a taller display sits beside it. Events
-/// parked in that band never satisfy the Dock's bottom-edge reveal test,
-/// because the cursor is below the panel's real bottom edge rather than on it.
-///
-/// The half-open test (`x < max_x`, `y < max_y`) matches the per-display edge
-/// pinning elsewhere in this file: the reachable maximum on each axis is
-/// `max - 1.0`, i.e. the display's real last row/column.
-fn clamp_to_displays(displays: &[DisplayBounds], x: f64, y: f64) -> (f64, f64) {
-    if displays.is_empty() {
-        return (x, y);
-    }
-    let inside = displays
-        .iter()
-        .any(|d| x >= d.min_x && x < d.max_x && y >= d.min_y && y < d.max_y);
-    if inside {
-        return (x, y);
-    }
-    let mut best = (x, y);
-    let mut best_dist = f64::MAX;
-    for d in displays {
-        let cx = x.clamp(d.min_x, d.max_x - 1.0);
-        let cy = y.clamp(d.min_y, d.max_y - 1.0);
-        let dist = (cx - x).powi(2) + (cy - y).powi(2);
-        if dist < best_dist {
-            best_dist = dist;
-            best = (cx, cy);
-        }
-    }
-    best
+/// Return the bounds of every active display that sits at the return edge.
+/// Enumeration is macOS-specific; the selection rule is shared.
+fn compute_edge_displays(return_edge: Edge) -> Vec<DisplayBounds> {
+    geometry::edge_displays_of(&compute_all_displays(), return_edge)
 }
 
 fn compute_display_bounds() -> DisplayBounds {
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
-
-    if let Ok(displays) = CGDisplay::active_displays() {
-        for id in displays {
-            let display = CGDisplay::new(id);
-            let bounds = display.bounds();
-            min_x = min_x.min(bounds.origin.x);
-            min_y = min_y.min(bounds.origin.y);
-            max_x = max_x.max(bounds.origin.x + bounds.size.width);
-            max_y = max_y.max(bounds.origin.y + bounds.size.height);
-        }
-    }
-
-    if min_x >= max_x {
-        return DisplayBounds {
-            min_x: 0.0,
-            min_y: 0.0,
-            max_x: 1920.0,
-            max_y: 1080.0,
-        };
-    }
-
-    DisplayBounds { min_x, min_y, max_x, max_y }
+    geometry::bounding_box(&compute_all_displays())
 }
 
 /// Extra flags macOS expects on certain keys. Arrow keys carry SecondaryFn
@@ -662,161 +449,5 @@ fn swap_alt_meta(code: u32) -> u32 {
         styx_keymap::KEY_LEFT_META => styx_keymap::KEY_LEFT_ALT,
         styx_keymap::KEY_RIGHT_META => styx_keymap::KEY_RIGHT_ALT,
         other => other,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{clamp_to_displays, resolve_edge_hit, DisplayBounds, Edge};
-
-    fn db(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> DisplayBounds {
-        DisplayBounds { min_x, min_y, max_x, max_y }
-    }
-
-    // The operator's real three-display layout in CG global coordinates:
-    //   built-in (main):  x[0,1470]   y[0,956]    -- short bottom edge
-    //   22" external:     x[-1503,0]  y[0,1002]   -- taller, defines global max_y
-    //   27" portrait:     x[0,1440]   y[-2560,0]  -- stacked above built-in
-    // The global bounding box bottom is 1002, so the OLD global clamp let the
-    // cursor sail to y=1001 -- 45px below the built-in's real bottom (956),
-    // into a phantom band that belongs to no display. The Dock never revealed.
-    fn real_layout() -> Vec<DisplayBounds> {
-        vec![
-            db(0.0, 0.0, 1470.0, 956.0),      // built-in
-            db(-1503.0, 0.0, 0.0, 1002.0),    // 22" external (left)
-            db(0.0, -2560.0, 1440.0, 0.0),    // 27" portrait (above)
-        ]
-    }
-
-    // THE BUG: pushing the cursor to the bottom of the built-in overshoots to
-    // the global ceiling (y=1001). That point is on no display, so it must be
-    // snapped back onto the built-in's real bottom row (y=955), where the Dock
-    // can finally see it. x is unchanged because it stays within the built-in.
-    #[test]
-    fn builtin_bottom_overshoot_snaps_to_real_edge() {
-        let d = real_layout();
-        let (x, y) = clamp_to_displays(&d, 500.0, 1001.0);
-        assert_eq!((x, y), (500.0, 955.0));
-    }
-
-    // The left external worked before because its real bottom (1002) equals the
-    // global max_y. Confirm the fix keeps it working: a point on its true bottom
-    // row is inside the display and passes through untouched.
-    #[test]
-    fn external_bottom_still_reachable() {
-        let d = real_layout();
-        let (x, y) = clamp_to_displays(&d, -700.0, 1001.0);
-        assert_eq!((x, y), (-700.0, 1001.0));
-    }
-
-    // A point comfortably inside the built-in is never perturbed -- the clamp
-    // must not interfere with ordinary motion.
-    #[test]
-    fn interior_point_untouched() {
-        let d = real_layout();
-        assert_eq!(clamp_to_displays(&d, 700.0, 400.0), (700.0, 400.0));
-    }
-
-    // The cursor must move freely across the shared x=0 border between the
-    // built-in and the left external at a y both share, with no snapping.
-    #[test]
-    fn crosses_shared_border_freely() {
-        let d = real_layout();
-        assert_eq!(clamp_to_displays(&d, -1.0, 400.0), (-1.0, 400.0)); // on external
-        assert_eq!(clamp_to_displays(&d, 0.0, 400.0), (0.0, 400.0));   // on built-in
-    }
-
-    // Overshooting below the portrait (its bottom is y=0) while horizontally
-    // over the built-in region must snap onto the built-in, not strand the
-    // cursor in the seam. Here (700, -5) is just above the built-in; (700, 5)
-    // is inside it. Confirm a point just below the portrait's bottom but inside
-    // the built-in's x-range stays put because it is already on the built-in.
-    #[test]
-    fn portrait_to_builtin_seam_has_no_deadzone() {
-        let d = real_layout();
-        // y=10 is inside the built-in (x in [0,1470)) -> untouched.
-        assert_eq!(clamp_to_displays(&d, 700.0, 10.0), (700.0, 10.0));
-    }
-
-    // Empty display list falls back to identity (caller then uses the global
-    // box). Guards the degenerate no-display path.
-    #[test]
-    fn empty_displays_is_identity() {
-        assert_eq!(clamp_to_displays(&[], 12.0, 34.0), (12.0, 34.0));
-    }
-
-    // Mirrors a real stacked layout reported in the field: a portrait
-    // monitor (right edge x=1440, occupying y in [-2560, 0)) sitting above
-    // a built-in laptop panel (right edge x=1470, y in [0, 956)). Both own
-    // the Right return edge (within EDGE_ALIGN_TOLERANCE of the extreme x
-    // of 1470). The global bounding box right edge is 1470, so the caller
-    // clamps cursor x to 1469.
-    fn stacked_right_edge() -> Vec<DisplayBounds> {
-        vec![
-            db(0.0, 0.0, 1470.0, 956.0),       // built-in
-            db(0.0, -2560.0, 1440.0, 0.0),     // portrait above
-        ]
-    }
-
-    // The regression: on the portrait, the cursor clamped to the global
-    // max_x (1469) lands past the portrait's own right edge (1440). The old
-    // code required x to be inside [1439, 1440) to register a hit, so it
-    // stuck. The fix must register a hit and pin x back to 1439.
-    #[test]
-    fn portrait_drifted_past_own_edge_hits_and_pins() {
-        let displays = stacked_right_edge();
-        let (nx, _ny, hit) = resolve_edge_hit(&displays, Edge::Right, 1469.0, -1000.0);
-        assert!(hit, "cursor on portrait at/over its right edge should register a hit");
-        assert_eq!(nx, 1439.0, "x should be pinned to the portrait's own outer edge");
-    }
-
-    // The built-in panel always worked because its right edge equals the
-    // global max_x; confirm the refactor keeps it working.
-    #[test]
-    fn builtin_at_edge_still_hits() {
-        let displays = stacked_right_edge();
-        let (nx, _ny, hit) = resolve_edge_hit(&displays, Edge::Right, 1469.0, 500.0);
-        assert!(hit);
-        assert_eq!(nx, 1469.0);
-    }
-
-    // Being on the portrait but not yet at its edge must NOT trigger return,
-    // and must not move the cursor.
-    #[test]
-    fn portrait_not_at_edge_does_not_hit() {
-        let displays = stacked_right_edge();
-        let (nx, ny, hit) = resolve_edge_hit(&displays, Edge::Right, 700.0, -1000.0);
-        assert!(!hit);
-        assert_eq!((nx, ny), (700.0, -1000.0));
-    }
-
-    // A position whose y falls in the gap between the two stacked displays
-    // (the built-in tops out at y=956, nothing owns the edge at y=975) is
-    // owned by no edge display, so no hit fires and the cursor is untouched.
-    #[test]
-    fn gap_between_stacked_displays_does_not_hit() {
-        let displays = stacked_right_edge();
-        let (nx, ny, hit) = resolve_edge_hit(&displays, Edge::Right, 1469.0, 975.0);
-        assert!(!hit);
-        assert_eq!((nx, ny), (1469.0, 975.0));
-    }
-
-    // Left return edge, single display anchored at x=0: reaching x<=0 pins
-    // to 0 and hits.
-    #[test]
-    fn left_edge_pins_to_min_x() {
-        let displays = vec![db(0.0, 0.0, 1440.0, 2560.0)];
-        let (nx, _ny, hit) = resolve_edge_hit(&displays, Edge::Left, 0.0, 1000.0);
-        assert!(hit);
-        assert_eq!(nx, 0.0);
-    }
-
-    // Bottom return edge: reaching y>=max_y-1 pins and hits.
-    #[test]
-    fn bottom_edge_pins_to_max_y() {
-        let displays = vec![db(0.0, 0.0, 1920.0, 1080.0)];
-        let (_nx, ny, hit) = resolve_edge_hit(&displays, Edge::Bottom, 500.0, 1079.0);
-        assert!(hit);
-        assert_eq!(ny, 1079.0);
     }
 }

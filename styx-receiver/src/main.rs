@@ -1,8 +1,28 @@
-mod clipboard;
-mod clipboard_image;
 mod edge;
-mod inject;
+mod geometry;
 mod transport;
+
+// Injection backend. Both modules expose the same `Injector` surface, so
+// every call site below is platform-agnostic; only construction differs.
+#[cfg(target_os = "macos")]
+mod inject;
+#[cfg(target_os = "linux")]
+#[path = "inject_linux.rs"]
+mod inject;
+
+// Clipboard backend. macOS splits text (`clipboard`) from the AppKit-backed
+// image/HTML path (`clipboard_image`); the Linux module implements the union
+// of both surfaces, so it is bound under both names and the call sites stay
+// identical across platforms.
+#[cfg(target_os = "macos")]
+mod clipboard;
+#[cfg(target_os = "macos")]
+mod clipboard_image;
+#[cfg(target_os = "linux")]
+#[path = "clipboard_linux.rs"]
+mod clipboard;
+#[cfg(target_os = "linux")]
+use clipboard as clipboard_image;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -15,7 +35,8 @@ use tokio::time;
 
 use styx_proto::Event;
 
-use inject::{Edge, Injector};
+use geometry::Edge;
+use inject::Injector;
 use transport::ReceiverTransport;
 
 #[derive(Parser)]
@@ -61,6 +82,42 @@ struct ReceiverConfig {
     return_edge: String,
     #[serde(default)]
     swap_alt_cmd: bool,
+    /// Display layout, used only by the Linux backend.
+    ///
+    /// macOS enumerates displays through CoreGraphics, but the Linux
+    /// receiver holds no display-server connection, so the layout has to be
+    /// declared. The virtual pointer's absolute axes are mapped onto the
+    /// extent computed from these rectangles; if it disagrees with the
+    /// compositor's real layout the cursor lands in the wrong place.
+    ///
+    /// Parsed on both platforms so a config file can be shared between them
+    /// without one side rejecting the other's keys.
+    #[serde(default)]
+    display: Vec<DisplayConfig>,
+}
+
+/// One display rectangle, in the compositor's logical layout coordinates
+/// (the same space `hyprctl monitors` reports as `x`, `y`, and the
+/// scale-adjusted `width`/`height`).
+#[derive(Deserialize, Clone, Copy, Debug)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct DisplayConfig {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl DisplayConfig {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn to_bounds(self) -> geometry::DisplayBounds {
+        geometry::DisplayBounds {
+            min_x: self.x,
+            min_y: self.y,
+            max_x: self.x + self.width,
+            max_y: self.y + self.height,
+        }
+    }
 }
 
 fn default_return_edge() -> String {
@@ -114,10 +171,12 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(15);
 /// is stuck in a respawn loop on networks where none of `listen_hosts`
 /// bind. 10 MiB is plenty of recent history for troubleshooting without
 /// accumulating hundreds of MiB across weeks of travel.
+#[cfg(target_os = "macos")]
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Matches `StandardErrorPath` in `dist/macos/styx-receiver.plist`.
 /// Hard-coded because launchd does not expose this to the child process.
+#[cfg(target_os = "macos")]
 const STDERR_LOG_PATH: &str = "/tmp/styx-receiver.stderr.log";
 
 /// Check the launchd-managed stderr log and, if it is larger than
@@ -132,6 +191,13 @@ const STDERR_LOG_PATH: &str = "/tmp/styx-receiver.stderr.log";
 /// Best-effort: any failure (missing file, permission error) leaves
 /// launchd's original redirect in place and logging continues to
 /// work normally.
+///
+/// macOS only. On Linux the receiver runs under systemd, which captures
+/// stderr into the journal and rotates it itself -- hijacking fd 2 to a
+/// fixed path there would keep output out of `journalctl`, silence
+/// foreground runs, and (since `/tmp` is world-writable) append into a
+/// file another user could have created first.
+#[cfg(target_os = "macos")]
 fn cap_stderr_log() {
     let truncate = match std::fs::metadata(STDERR_LOG_PATH) {
         Ok(meta) => meta.len() > MAX_LOG_SIZE,
@@ -164,22 +230,28 @@ fn cap_stderr_log() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
     cap_stderr_log();
     env_logger::init();
 
     // Check Accessibility permission early so it's obvious in the logs.
-    let trusted = unsafe {
-        #[link(name = "ApplicationServices", kind = "framework")]
-        unsafe extern "C" {
-            fn AXIsProcessTrusted() -> bool;
+    // macOS-only: the Linux backend's equivalent failure is `/dev/uinput`
+    // being unopenable, which surfaces as a hard error at Injector::new.
+    #[cfg(target_os = "macos")]
+    {
+        let trusted = unsafe {
+            #[link(name = "ApplicationServices", kind = "framework")]
+            unsafe extern "C" {
+                fn AXIsProcessTrusted() -> bool;
+            }
+            AXIsProcessTrusted()
+        };
+        if trusted {
+            log::info!("accessibility: granted");
+        } else {
+            log::error!("accessibility: NOT GRANTED -- input injection will silently fail");
+            log::error!("grant permission to Styx Receiver.app in System Settings > Privacy & Security > Accessibility");
         }
-        AXIsProcessTrusted()
-    };
-    if trusted {
-        log::info!("accessibility: granted");
-    } else {
-        log::error!("accessibility: NOT GRANTED -- input injection will silently fail");
-        log::error!("grant permission to Styx Receiver.app in System Settings > Privacy & Security > Accessibility");
     }
 
     let cli = Cli::parse();
@@ -295,10 +367,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(accept_tx);
 
     let mut transport = ReceiverTransport::new();
-    let mut injector = Injector::new(return_edge, config.receiver.swap_alt_cmd)?;
-    if config.receiver.swap_alt_cmd {
-        log::info!("modifier remap: Alt->Cmd, Super->Option (swap_alt_cmd=true)");
-    }
+
+    #[cfg(target_os = "macos")]
+    let mut injector = {
+        let injector = Injector::new(return_edge, config.receiver.swap_alt_cmd)?;
+        if config.receiver.swap_alt_cmd {
+            log::info!("modifier remap: Alt->Cmd, Super->Option (swap_alt_cmd=true)");
+        }
+        injector
+    };
+
+    // The Linux backend needs the display layout up front and has no way to
+    // discover it, so an empty list is a hard configuration error rather than
+    // something to guess around.
+    #[cfg(target_os = "linux")]
+    let mut injector = {
+        clipboard::check_tools();
+        let displays: Vec<geometry::DisplayBounds> = config
+            .receiver
+            .display
+            .iter()
+            .map(|d| d.to_bounds())
+            .collect();
+        if displays.is_empty() {
+            return Err(
+                "receiver config: the Linux backend needs at least one [[receiver.display]] \
+                 entry describing the compositor's layout. See docs/linux-receiver.md."
+                    .into(),
+            );
+        }
+        if config.receiver.swap_alt_cmd {
+            log::warn!("swap_alt_cmd is ignored by the Linux backend; both ends use evdev codes");
+        }
+        Injector::new(return_edge, displays)?
+    };
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;

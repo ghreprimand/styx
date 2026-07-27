@@ -4,6 +4,15 @@ A purpose-built software KVM for sharing a keyboard and mouse from a [Hyprland](
 
 Styx is narrow in scope by design. It does one thing: send keyboard and mouse input from a Hyprland Wayland compositor to macOS, with seamless edge-based transitions. It is not a general-purpose KVM, does not support Windows, does not support arbitrary Wayland compositors, and is unidirectional (Linux to Mac only). If you need broader compatibility, use [Input Leap](https://github.com/input-leap/input-leap), [Deskflow](https://github.com/deskflow/deskflow), or [lan-mouse](https://github.com/feschber/lan-mouse).
 
+> **You are on the `feat/hybrid-relay` branch.** It extends styx beyond the
+> single Linux-to-Mac pair described below: `styx-receiver` also builds for
+> Linux here, so a second Linux machine can be a receiving end. See
+> [docs/linux-receiver.md](docs/linux-receiver.md) for setup and
+> [docs/relay-topology.md](docs/relay-topology.md) for the three-node
+> workstation → Mac → laptop design this is the first step toward. The wire
+> protocol is unchanged and the existing Linux-to-Mac path behaves exactly as
+> documented here. None of this is on `main`.
+
 ## Quickstart
 
 A minimal Linux-to-Mac setup, start to finish. Each step links to a fuller section below.
