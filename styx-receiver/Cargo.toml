@@ -4,17 +4,12 @@ version = "0.5.7"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Styx receiver -- injects input on macOS from a Linux sender"
+description = "Styx receiver -- injects input from a styx sender (macOS and Linux)"
 
 [dependencies]
 styx-proto = { path = "../styx-proto" }
 styx-keymap = { path = "../styx-keymap" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time", "process"] }
-core-graphics = { version = "0.24", features = ["highsierra"] }
-core-foundation = "0.10"
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSDictionary"] }
-objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImageRep", "NSBitmapImageRep"] }
 bitflags = "2"
 keycode = "0.4"
 log = "0.4"
@@ -25,3 +20,16 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 libc = "0.2"
 socket2 = "0.5"
+
+# Injection and clipboard are platform-specific. The Apple framework crates
+# do not build on Linux and evdev does not build on macOS, so each is scoped
+# to its own target rather than gated inside the source.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.24", features = ["highsierra"] }
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSDictionary"] }
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard", "NSImageRep", "NSBitmapImageRep"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"

@@ -57,4 +57,33 @@ return_edge = "right"
 
 # Swap Alt and Super/Meta so physical key positions match macOS layout:
 # PC Ctrl|Super|Alt maps to Mac Control|Option|Command by position.
+# Ignored by the Linux receiver backend, which uses evdev codes on both
+# ends and so needs no remapping.
 # swap_alt_cmd = true
+
+# --- Linux receiver only (feat/hybrid-relay branch) ---
+#
+# The macOS receiver enumerates displays through CoreGraphics. The Linux
+# receiver holds no display-server connection, so its layout has to be
+# declared here: the virtual pointer's absolute axes are mapped onto the
+# extent these rectangles describe. A mismatch with the compositor's real
+# layout puts the cursor in the wrong place.
+#
+# One block per display, in the compositor's LOGICAL coordinates -- take
+# x, y, width, and height from `hyprctl monitors -j`, dividing width and
+# height by `scale` for HiDPI outputs (3840x2160 at scale 1.5 -> 2560x1440).
+#
+# These keys are ignored by the macOS receiver, so one config file can be
+# shared between both platforms.
+#
+# [[receiver.display]]
+# x = 0
+# y = 0
+# width = 1920
+# height = 1080
+#
+# [[receiver.display]]
+# x = 1920
+# y = 0
+# width = 2560
+# height = 1440
