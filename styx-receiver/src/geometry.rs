@@ -252,6 +252,45 @@ pub enum EdgeHit {
     Forward,
 }
 
+/// Which displays are allowed to own a crossover edge.
+///
+/// The default, `All`, unions every display within `EDGE_ALIGN_TOLERANCE` of
+/// the outermost edge -- correct for an edge facing a sender whose desktop is
+/// as tall as this one's. `Primary` restricts the edge to the single display
+/// at the global origin, for the case where only one physical screen should
+/// face the peer even though a stacked monitor shares the same outer column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDisplays {
+    All,
+    Primary,
+}
+
+/// The display at the global origin.
+///
+/// On macOS this is the main display by definition: Core Graphics places its
+/// bounds origin at (0, 0) and positions every other display relative to it,
+/// so a monitor stacked above has negative y. On Linux it is whichever
+/// display the compositor's layout puts at the origin.
+///
+/// Falls back to the display nearest the origin when none contains it, so a
+/// layout with no display exactly at (0, 0) still resolves to one screen
+/// rather than silently selecting nothing.
+pub fn primary_display(all: &[DisplayBounds]) -> Option<DisplayBounds> {
+    if all.is_empty() {
+        return None;
+    }
+    all.iter()
+        .find(|d| d.min_x <= 0.0 && 0.0 < d.max_x && d.min_y <= 0.0 && 0.0 < d.max_y)
+        .or_else(|| {
+            all.iter().min_by(|a, b| {
+                let da = a.min_x.hypot(a.min_y);
+                let db = b.min_x.hypot(b.min_y);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        })
+        .copied()
+}
+
 /// One crossover edge: which side it is, which displays own it, and their
 /// unioned span along the parallel axis.
 #[derive(Debug, Clone)]
@@ -262,8 +301,25 @@ pub struct EdgeConfig {
 }
 
 impl EdgeConfig {
+    /// Shorthand for the default `All` selection. Test-only: production
+    /// callers thread the configured selection through explicitly, so that
+    /// a restriction can never be dropped by reaching for the terser call.
+    #[cfg(test)]
     pub fn build(all: &[DisplayBounds], edge: Edge) -> Self {
-        let displays = edge_displays_of(all, edge);
+        Self::build_with(all, edge, EdgeDisplays::All)
+    }
+
+    /// Build an edge from the subset of displays `selection` admits.
+    ///
+    /// `Primary` filters before the edge test rather than after, so the edge
+    /// is that display's own outer boundary. The tolerance union never runs,
+    /// and a stacked neighbour cannot pull the span past the chosen screen.
+    pub fn build_with(all: &[DisplayBounds], edge: Edge, selection: EdgeDisplays) -> Self {
+        let pool: Vec<DisplayBounds> = match selection {
+            EdgeDisplays::All => all.to_vec(),
+            EdgeDisplays::Primary => primary_display(all).into_iter().collect(),
+        };
+        let displays = edge_displays_of(&pool, edge);
         let span = span_of_displays(&displays, edge);
         EdgeConfig { edge, displays, span }
     }
@@ -514,6 +570,77 @@ mod tests {
     fn span_unions_stacked_displays() {
         let span = span_of_displays(&stacked_right_edge(), Edge::Right);
         assert_eq!((span.min, span.max), (-2560.0, 956.0));
+    }
+
+    // Both displays in the stacked layout start at x=0, so they equally own
+    // the *left* edge too. That is correct for the sender-facing edge and
+    // wrong for an edge facing a downstream peer that should see only the
+    // built-in: the span runs the full 3516pt height of both screens.
+    #[test]
+    fn left_edge_unions_stacked_displays_by_default() {
+        let f = EdgeConfig::build(&stacked_right_edge(), Edge::Left);
+        assert_eq!(f.displays.len(), 2);
+        assert_eq!((f.span.min, f.span.max), (-2560.0, 956.0));
+    }
+
+    #[test]
+    fn primary_display_is_the_one_at_the_origin() {
+        let p = primary_display(&stacked_right_edge()).unwrap();
+        assert_eq!(p, db(0.0, 0.0, 1470.0, 956.0), "the built-in, not the portrait");
+    }
+
+    // Restricting to Primary confines the edge to the built-in panel.
+    #[test]
+    fn primary_restricts_left_edge_to_the_builtin() {
+        let f = EdgeConfig::build_with(&stacked_right_edge(), Edge::Left, EdgeDisplays::Primary);
+        assert_eq!(f.displays.len(), 1);
+        assert_eq!((f.span.min, f.span.max), (0.0, 956.0));
+    }
+
+    // The property that keeps the *other* direction byte-for-byte identical.
+    // `from_bottom` is measured down from span.max, and the portrait sits
+    // above the built-in, so restricting the edge cannot move span.max --
+    // every from_bottom reported for a cursor on the built-in is unchanged.
+    #[test]
+    fn restricting_the_edge_preserves_span_max() {
+        let all = EdgeConfig::build(&stacked_right_edge(), Edge::Left);
+        let primary =
+            EdgeConfig::build_with(&stacked_right_edge(), Edge::Left, EdgeDisplays::Primary);
+        assert_eq!(all.span.max, primary.span.max);
+
+        for y in [0.0, 500.0, 955.0] {
+            let (a, _) = from_bottom_of(all.span, Edge::Left, 0.0, y);
+            let (b, _) = from_bottom_of(primary.span, Edge::Left, 0.0, y);
+            assert_eq!(a, b, "from_bottom differs at y={y}");
+        }
+    }
+
+    // The regression this fixes: a peer 1080 tall hands the cursor back at
+    // from_bottom=1080, which is 124pt taller than the built-in. Unrestricted
+    // that lands on the portrait; restricted it clamps to the built-in's top
+    // row and stays on the intended screen.
+    #[test]
+    fn tall_peer_return_stays_on_the_builtin() {
+        let displays = stacked_right_edge();
+
+        let all = EdgeConfig::build(&displays, Edge::Left);
+        let (_x, y) = place_from_bottom(&all.displays, all.span, Edge::Left, 1080.0).unwrap();
+        assert!(y < 0.0, "unrestricted: lands on the portrait above (y={y})");
+
+        let primary = EdgeConfig::build_with(&displays, Edge::Left, EdgeDisplays::Primary);
+        let (x, y) =
+            place_from_bottom(&primary.displays, primary.span, Edge::Left, 1080.0).unwrap();
+        assert_eq!(x, 2.0, "2pt inset from the built-in's left edge");
+        assert_eq!(y, 0.0, "clamped to the built-in's top row");
+    }
+
+    // Selection is per-edge: the sender-facing return edge must keep unioning
+    // both screens regardless of what the forward edge is restricted to.
+    #[test]
+    fn primary_selection_does_not_affect_the_return_edge() {
+        let ret = EdgeConfig::build(&stacked_right_edge(), Edge::Right);
+        assert_eq!(ret.displays.len(), 2);
+        assert_eq!((ret.span.min, ret.span.max), (-2560.0, 956.0));
     }
 
     // Round trip: a cursor placed from a given from_bottom must report that

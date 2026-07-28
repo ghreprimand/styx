@@ -14,7 +14,7 @@ use core_graphics::geometry::CGPoint;
 use styx_keymap;
 
 use crate::geometry::{
-    self, DisplayBounds, Edge, EdgeConfig, EdgeHit, EdgeSpan, span_of_displays,
+    self, DisplayBounds, Edge, EdgeConfig, EdgeDisplays, EdgeHit, EdgeSpan, span_of_displays,
 };
 
 const K_IOPM_USER_ACTIVE_LOCAL: u32 = 0;
@@ -45,6 +45,10 @@ pub struct Injector {
     /// Edge facing the downstream peer, when this mac relays. `None` on a
     /// terminal receiver.
     forward: Option<EdgeConfig>,
+    /// Which displays may own the forward edge. Retained because `refresh`
+    /// rebuilds that edge on every display-configuration change and must
+    /// reapply the same restriction.
+    forward_displays: EdgeDisplays,
     /// Whether the downstream link is currently healthy. While false the
     /// forward edge is not passed to `resolve_motion` at all, so behaviour is
     /// identical to a mac with no relay configured.
@@ -102,6 +106,7 @@ impl Injector {
         return_edge: Edge,
         swap_alt_cmd: bool,
         forward_edge: Option<Edge>,
+        forward_displays: EdgeDisplays,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| "failed to create CGEventSource")?;
@@ -118,7 +123,7 @@ impl Injector {
                 )
                 .into());
             }
-            Some(e) => Some(EdgeConfig::build(&displays, e)),
+            Some(e) => Some(EdgeConfig::build_with(&displays, e, forward_displays)),
             None => None,
         };
 
@@ -128,6 +133,12 @@ impl Injector {
             edge_displays.len(),
             edge_span.min, edge_span.max
         );
+        if let Some(f) = forward.as_ref() {
+            log::info!(
+                "forward edge: {:?}, displays: {} ({:?}), span: [{}, {}]",
+                f.edge, f.displays.len(), forward_displays, f.span.min, f.span.max,
+            );
+        }
         let mid = edge_span.min + 0.5 * (edge_span.max - edge_span.min);
         let cursor_pos = match return_edge {
             Edge::Right => CGPoint::new(bounds.max_x - 2.0, mid),
@@ -151,6 +162,7 @@ impl Injector {
             edge_span,
             return_edge,
             forward,
+            forward_displays,
             forward_armed: false,
             swap_alt_cmd,
             assertion_name: CFString::new("styx-receiver"),
@@ -185,7 +197,8 @@ impl Injector {
         self.edge_displays = compute_edge_displays(self.return_edge);
         self.edge_span = span_of_displays(&self.edge_displays, self.return_edge);
         if let Some(f) = self.forward.as_ref() {
-            self.forward = Some(EdgeConfig::build(&self.displays, f.edge));
+            self.forward =
+                Some(EdgeConfig::build_with(&self.displays, f.edge, self.forward_displays));
         }
         log::info!(
             "reinit: display bounds: x=[{}, {}] y=[{}, {}], edge displays: {}, edge span: [{}, {}]",

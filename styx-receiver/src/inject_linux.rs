@@ -27,7 +27,7 @@ use evdev::{
 };
 
 use crate::geometry::{
-    self, DisplayBounds, Edge, EdgeConfig, EdgeHit, EdgeSpan, span_of_displays,
+    self, DisplayBounds, Edge, EdgeConfig, EdgeDisplays, EdgeHit, EdgeSpan, span_of_displays,
 };
 
 const BTN_LEFT: u32 = 0x110;
@@ -86,6 +86,7 @@ impl Injector {
         return_edge: Edge,
         displays: Vec<DisplayBounds>,
         forward_edge: Option<Edge>,
+        forward_displays: EdgeDisplays,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if displays.is_empty() {
             return Err("no displays configured; set [[receiver.display]] in the config".into());
@@ -102,9 +103,15 @@ impl Injector {
                 )
                 .into());
             }
-            Some(e) => Some(EdgeConfig::build(&displays, e)),
+            Some(e) => Some(EdgeConfig::build_with(&displays, e, forward_displays)),
             None => None,
         };
+        if let Some(f) = forward.as_ref() {
+            log::info!(
+                "forward edge: {:?}, displays: {} ({:?}), span: [{}, {}]",
+                f.edge, f.displays.len(), forward_displays, f.span.min, f.span.max,
+            );
+        }
 
         let pointer = build_pointer_device()?;
         let keyboard = build_keyboard_device()?;

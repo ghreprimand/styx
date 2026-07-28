@@ -37,7 +37,7 @@ use tokio::time;
 use styx_proto::Event;
 
 use downstream::DownstreamLink;
-use geometry::{Edge, EdgeHit};
+use geometry::{Edge, EdgeDisplays, EdgeHit};
 use inject::Injector;
 use transport::ReceiverTransport;
 
@@ -186,6 +186,31 @@ struct RelayConfig {
     /// Side of this machine's display that faces the downstream peer. Must
     /// differ from `return_edge`.
     forward_edge: String,
+    /// Which displays own the forward edge: `"all"` (default) unions every
+    /// display sharing that outer column, `"primary"` restricts it to the
+    /// display at the global origin.
+    ///
+    /// Set this to `"primary"` when a second monitor is stacked above or
+    /// below the main screen but should not face the downstream peer.
+    /// Otherwise the stacked monitor shares the edge, and a peer handing the
+    /// cursor back at an offset taller than the main screen lands on it.
+    #[serde(default = "default_forward_displays")]
+    forward_displays: String,
+}
+
+fn default_forward_displays() -> String {
+    "all".to_string()
+}
+
+fn parse_edge_displays(s: &str) -> Result<EdgeDisplays, Box<dyn std::error::Error>> {
+    match s.to_ascii_lowercase().as_str() {
+        "all" => Ok(EdgeDisplays::All),
+        "primary" => Ok(EdgeDisplays::Primary),
+        other => Err(format!(
+            "invalid forward_displays '{other}'; expected \"all\" or \"primary\""
+        )
+        .into()),
+    }
 }
 
 /// One display rectangle, in the compositor's logical layout coordinates
@@ -462,9 +487,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Downstream relay link, if configured. Constructed before the injector
     // because the injector needs to know which edge faces the peer.
-    let (mut downstream, forward_edge) = match &config.receiver.relay {
+    let (mut downstream, forward_edge, forward_displays) = match &config.receiver.relay {
         Some(relay) => {
             let edge = parse_edge(&relay.forward_edge)?;
+            let selection = parse_edge_displays(&relay.forward_displays)?;
             if edge == return_edge {
                 return Err(format!(
                     "receiver config: forward_edge and return_edge are both '{}'; \
@@ -496,21 +522,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("invalid downstream address: {e}"))?;
 
             log::info!(
-                "relay configured: forward_edge={:?}, downstream={:?}",
-                edge, addrs,
+                "relay configured: forward_edge={:?}, forward_displays={:?}, downstream={:?}",
+                edge, selection, addrs,
             );
             log::info!(
                 "forward edge stays disarmed until the downstream link is up; \
                  until then this node behaves as a plain receiver",
             );
-            (Some(DownstreamLink::spawn(addrs)), Some(edge))
+            (Some(DownstreamLink::spawn(addrs)), Some(edge), selection)
         }
-        None => (None, None),
+        None => (None, None, EdgeDisplays::All),
     };
 
     #[cfg(target_os = "macos")]
     let mut injector = {
-        let injector = Injector::new(return_edge, config.receiver.swap_alt_cmd, forward_edge)?;
+        let injector = Injector::new(
+            return_edge,
+            config.receiver.swap_alt_cmd,
+            forward_edge,
+            forward_displays,
+        )?;
         if config.receiver.swap_alt_cmd {
             log::info!("modifier remap: Alt->Cmd, Super->Option (swap_alt_cmd=true)");
         }
@@ -539,7 +570,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if config.receiver.swap_alt_cmd {
             log::warn!("swap_alt_cmd is ignored by the Linux backend; both ends use evdev codes");
         }
-        Injector::new(return_edge, displays, forward_edge)?
+        Injector::new(return_edge, displays, forward_edge, forward_displays)?
     };
 
     let mut sigterm = signal(SignalKind::terminate())?;
