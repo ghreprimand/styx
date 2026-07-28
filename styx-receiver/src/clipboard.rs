@@ -35,6 +35,19 @@ pub fn hash_html(html: &str, plain: &str) -> u64 {
     h.finish()
 }
 
+/// Hash of what a `ClipboardHtml` payload becomes once written here.
+///
+/// NSPasteboard carries `public.html` and `public.utf8-plain-text` side by
+/// side, so nothing is lost on this platform and the answer is just
+/// `hash_html`. The Linux receiver's version is not the identity, because
+/// `wl-copy` can only hold one MIME type and the rich half is dropped.
+///
+/// This exists so `main.rs` can record the post-write hash unconditionally
+/// instead of branching on the platform at the call site.
+pub fn hash_html_as_written(html: &str, plain: &str) -> u64 {
+    hash_html(html, plain)
+}
+
 pub async fn read_clipboard() -> Option<String> {
     let result = time::timeout(
         TIMEOUT,

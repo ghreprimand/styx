@@ -89,6 +89,24 @@ impl DownstreamLink {
         }
     }
 
+    /// Queue an event whose loss is not worth breaking the link over.
+    ///
+    /// Clipboard payloads only. A full queue here means the peer is briefly
+    /// behind -- a 20 MiB image ahead of us in the queue will do it -- and the
+    /// right response is to drop this update, not to declare the link dead.
+    /// The next copy supersedes it, and the hash dedup on both ends converges
+    /// regardless of which individual updates were lost.
+    ///
+    /// This is the whole difference from `try_send`: an input event that
+    /// vanishes leaves a modifier stuck down and the session unusable, so that
+    /// path deliberately poisons `healthy` to force cursor recovery. A
+    /// clipboard update that vanishes costs the user one Cmd+C.
+    pub fn try_send_lossy(&self, event: Event) {
+        if self.to_peer.try_send(event).is_err() {
+            log::debug!("dropped clipboard update to downstream peer");
+        }
+    }
+
     /// Receive the next event from the downstream peer. Cancel-safe, so it
     /// can be used directly in `tokio::select!`.
     pub async fn recv(&mut self) -> Option<Event> {

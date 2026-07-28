@@ -78,6 +78,30 @@ pub fn hash_html(html: &str, plain: &str) -> u64 {
     h.finish()
 }
 
+/// The bytes `write_clipboard_html` will actually put on the clipboard.
+///
+/// Shared by the writer and by `hash_html_as_written` so the two cannot drift
+/// apart: if this selection ever changes, both follow it automatically.
+fn html_body<'a>(html: &'a str, plain: &'a str) -> &'a str {
+    if plain.is_empty() { html } else { plain }
+}
+
+/// Hash of what a `ClipboardHtml` payload *becomes* on this platform, as
+/// opposed to what was sent.
+///
+/// `wl-copy` takes one MIME type per invocation, so rich text lands here as
+/// plain text and reads back as plain text. Recording `hash_html` after such a
+/// write would leave the dedup state describing content this machine does not
+/// have: the next poll reads plain text, computes a different hash, concludes
+/// the user made a fresh copy, and ships the degraded plain text back out --
+/// silently replacing the newer rich clipboard at the node that sent it.
+///
+/// Recording *this* hash instead makes the lossy write a fixed point, so the
+/// content stops here rather than echoing back downgraded.
+pub fn hash_html_as_written(html: &str, plain: &str) -> u64 {
+    hash_text(html_body(html, plain))
+}
+
 // --- async surface, mirroring the macOS `clipboard` module ---
 
 pub async fn read_clipboard() -> Option<String> {
@@ -228,7 +252,7 @@ pub fn write_clipboard_image(format: &str, data: &[u8]) {
 /// same asymmetry the macOS-to-Linux direction already has. Writing the HTML
 /// instead would leave plain-text consumers staring at raw markup.
 pub fn write_clipboard_html(html: &str, plain: &str) {
-    let body = if plain.is_empty() { html } else { plain };
+    let body = html_body(html, plain);
     if body.is_empty() {
         return;
     }
@@ -302,6 +326,32 @@ mod tests {
     #[test]
     fn hash_html_distinguishes_plain_fallback() {
         assert_ne!(hash_html("<b>a</b>", "a"), hash_html("<b>a</b>", "b"));
+    }
+
+    // The whole point of hash_html_as_written: after a lossy html write the
+    // clipboard holds plain text, so the recorded hash must be the plain-text
+    // hash. If it were hash_html, the next poll would read plain text, see a
+    // different hash, and ship the degraded copy back upstream.
+    #[test]
+    fn html_as_written_hashes_the_plain_body() {
+        assert_eq!(hash_html_as_written("<b>a</b>", "a"), hash_text("a"));
+        assert_ne!(hash_html_as_written("<b>a</b>", "a"), hash_html("<b>a</b>", "a"));
+    }
+
+    // With no plain fallback the raw html is what lands on the clipboard, so
+    // that is what must be hashed.
+    #[test]
+    fn html_as_written_falls_back_to_markup() {
+        assert_eq!(hash_html_as_written("<b>a</b>", ""), hash_text("<b>a</b>"));
+    }
+
+    // Guards the writer/hasher pairing structurally: both route through
+    // html_body, so this fails the moment one of them stops doing so.
+    #[test]
+    fn html_body_selection_is_shared_with_the_writer() {
+        assert_eq!(html_body("<b>a</b>", "a"), "a");
+        assert_eq!(html_body("<b>a</b>", ""), "<b>a</b>");
+        assert_eq!(hash_html_as_written("<b>a</b>", "a"), hash_text(html_body("<b>a</b>", "a")));
     }
 
     // The image cap must stay under styx-proto's frame ceiling or an
