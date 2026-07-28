@@ -69,7 +69,7 @@ def keyboard_device_label(path):
     """Human-friendly label for a /dev/input/by-id keyboard symlink.
 
     Derives a readable model name from the by-id filename (e.g.
-    "usb-SONiX_QK75_KB-event-kbd" -> "SONiX QK75 KB") and appends the
+    "usb-Vendor_Model_KB-event-kbd" -> "Vendor Model KB") and appends the
     resolved event node so two devices with similar names stay
     distinguishable.
     """
