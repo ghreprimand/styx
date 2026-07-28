@@ -1,3 +1,4 @@
+mod downstream;
 mod edge;
 mod geometry;
 mod transport;
@@ -35,9 +36,22 @@ use tokio::time;
 
 use styx_proto::Event;
 
-use geometry::Edge;
+use downstream::DownstreamLink;
+use geometry::{Edge, EdgeHit};
 use inject::Injector;
 use transport::ReceiverTransport;
+
+/// What this node is currently doing. Derived entirely from link state and
+/// cursor position; never configured directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Injecting upstream events locally. The behaviour that predates the
+    /// relay, and the only mode a node without `[receiver.relay]` ever has.
+    Receiving,
+    /// Routing upstream events to the downstream peer, injecting nothing
+    /// locally.
+    Forwarding,
+}
 
 #[derive(Parser)]
 #[command(name = "styx-receiver", about = "Styx software KVM receiver", version)]
@@ -94,6 +108,27 @@ struct ReceiverConfig {
     /// without one side rejecting the other's keys.
     #[serde(default)]
     display: Vec<DisplayConfig>,
+    /// Downstream peer, when this node relays onward. Absent on a terminal
+    /// receiver, in which case no outbound link is constructed at all and the
+    /// binary behaves exactly as it did before the relay existed.
+    #[serde(default)]
+    relay: Option<RelayConfig>,
+}
+
+/// Downstream half of a relay node.
+#[derive(Deserialize, Debug)]
+struct RelayConfig {
+    /// Single downstream address.
+    #[serde(default)]
+    host: Option<String>,
+    /// Several downstream addresses, tried in order. Use when the peer has
+    /// more than one interface.
+    #[serde(default)]
+    hosts: Vec<String>,
+    port: u16,
+    /// Side of this machine's display that faces the downstream peer. Must
+    /// differ from `return_edge`.
+    forward_edge: String,
 }
 
 /// One display rectangle, in the compositor's logical layout coordinates
@@ -368,9 +403,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut transport = ReceiverTransport::new();
 
+    // Downstream relay link, if configured. Constructed before the injector
+    // because the injector needs to know which edge faces the peer.
+    let (mut downstream, forward_edge) = match &config.receiver.relay {
+        Some(relay) => {
+            let edge = parse_edge(&relay.forward_edge)?;
+            if edge == return_edge {
+                return Err(format!(
+                    "receiver config: forward_edge and return_edge are both '{}'; \
+                     they must be different sides",
+                    relay.forward_edge,
+                )
+                .into());
+            }
+
+            let mut hosts: Vec<String> = Vec::new();
+            if let Some(h) = &relay.host {
+                hosts.push(h.clone());
+            }
+            for h in &relay.hosts {
+                if !hosts.contains(h) {
+                    hosts.push(h.clone());
+                }
+            }
+            if hosts.is_empty() {
+                return Err(
+                    "receiver config: [receiver.relay] must set host or hosts".into(),
+                );
+            }
+
+            let addrs: Vec<SocketAddr> = hosts
+                .iter()
+                .map(|h| format!("{h}:{}", relay.port).parse())
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("invalid downstream address: {e}"))?;
+
+            log::info!(
+                "relay configured: forward_edge={:?}, downstream={:?}",
+                edge, addrs,
+            );
+            log::info!(
+                "forward edge stays disarmed until the downstream link is up; \
+                 until then this node behaves as a plain receiver",
+            );
+            (Some(DownstreamLink::spawn(addrs)), Some(edge))
+        }
+        None => (None, None),
+    };
+
     #[cfg(target_os = "macos")]
     let mut injector = {
-        let injector = Injector::new(return_edge, config.receiver.swap_alt_cmd)?;
+        let injector = Injector::new(return_edge, config.receiver.swap_alt_cmd, forward_edge)?;
         if config.receiver.swap_alt_cmd {
             log::info!("modifier remap: Alt->Cmd, Super->Option (swap_alt_cmd=true)");
         }
@@ -399,7 +482,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if config.receiver.swap_alt_cmd {
             log::warn!("swap_alt_cmd is ignored by the Linux backend; both ends use evdev codes");
         }
-        Injector::new(return_edge, displays)?
+        Injector::new(return_edge, displays, forward_edge)?
     };
 
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -444,7 +527,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Process events on this connection until it dies.
         // Also accept new connections -- if the sender reconnects, drop the
         // stale socket and switch to the new one immediately.
+        //
+        // A fresh upstream connection always starts in Receiving: the cursor
+        // arrives on this machine, not beyond it.
+        let mut mode = Mode::Receiving;
+
         loop {
+            // Arm the forward edge from downstream health on every iteration.
+            // Cheap (one relaxed load and a bool store) and keeps arming
+            // reactive to link state without a separate timer.
+            let downstream_up = downstream.as_ref().is_some_and(|d| d.is_healthy());
+            injector.set_forward_armed(downstream_up);
+
+            // Downstream died while the cursor was over there. The upstream
+            // sender still holds its evdev grab and is streaming into a route
+            // that no longer exists, so recover the cursor onto this machine
+            // rather than swallowing input. The user sees a jump, which is the
+            // correct outcome.
+            if mode == Mode::Forwarding && !downstream_up {
+                log::warn!("downstream lost while forwarding; recovering cursor locally");
+                injector.place_cursor_at_forward_edge(0.0);
+                injector.release_all_keys();
+                mode = Mode::Receiving;
+            }
+
             let event = tokio::select! {
                 r = time::timeout(RECV_TIMEOUT, transport.recv()) => match r {
                     Ok(Ok(event)) => event,
@@ -491,6 +597,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     continue;
                 },
+                Some(event) = async {
+                    match downstream.as_mut() {
+                        Some(d) => d.recv().await,
+                        // No relay configured: never resolves, so this branch
+                        // is inert rather than spinning.
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Event::ReturnToSender { from_bottom, source_height } = event {
+                        log::info!(
+                            "downstream returned cursor (from_bottom={from_bottom:.0}, height={source_height:.0})"
+                        );
+                        // Tell the peer to drop any held keys, then take the
+                        // cursor back at the forward edge.
+                        if let Some(d) = downstream.as_ref() {
+                            d.try_send(Event::CaptureEnd);
+                        }
+                        let scaled = if source_height > 0.0 {
+                            let (_, own_height) = injector.cursor_from_forward_edge();
+                            from_bottom * (own_height / source_height)
+                        } else {
+                            from_bottom
+                        };
+                        injector.place_cursor_at_forward_edge(scaled);
+                        mode = Mode::Receiving;
+                    }
+                    continue;
+                },
+
                 maybe = accept_rx.recv() => match maybe {
                     Some((stream, peer)) => {
                         log::info!("new connection from {peer}, replacing existing");
@@ -521,8 +656,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             };
-            let returned = handle_event(&mut injector, &mut transport, &mut last_clip_hash, event).await;
-            if returned {
+            // While forwarding, this node is a pure router: input events go
+            // straight out the downstream link and nothing is injected here.
+            // Clipboard and capture bookkeeping are still handled locally.
+            if mode == Mode::Forwarding {
+                match event {
+                    Event::MouseMotion { .. }
+                    | Event::MouseButton { .. }
+                    | Event::MouseScroll { .. }
+                    | Event::KeyPress { .. }
+                    | Event::KeyRelease { .. } => {
+                        let sent = downstream
+                            .as_ref()
+                            .map(|d| d.try_send(event))
+                            .unwrap_or(false);
+                        if !sent {
+                            // The next loop iteration sees the link unhealthy
+                            // and runs the cursor recovery above.
+                            log::warn!("forward failed; downstream link is wedged");
+                        }
+                        continue;
+                    }
+                    // Answer upstream heartbeats locally. Forwarding them
+                    // would make the sender's dead-peer detection measure the
+                    // whole chain.
+                    Event::Heartbeat => {
+                        let _ = transport.send(&Event::HeartbeatAck).await;
+                        continue;
+                    }
+                    // Upstream ended capture (cursor went back to the
+                    // workstation, or the sender is shutting down). Tear the
+                    // downstream capture down with it so no key is left held.
+                    Event::CaptureEnd => {
+                        if let Some(d) = downstream.as_ref() {
+                            d.try_send(Event::CaptureEnd);
+                        }
+                        log::info!("upstream ended capture while forwarding");
+                        mode = Mode::Receiving;
+                        continue;
+                    }
+                    // Clipboard and anything else falls through to the normal
+                    // local handling below.
+                    _ => {}
+                }
+            }
+
+            let outcome = handle_event(&mut injector, &mut transport, &mut last_clip_hash, event).await;
+
+            if outcome == EdgeHit::Forward {
+                // Cursor reached the edge facing the downstream peer, and the
+                // edge only fires when the link is healthy. Hand over: seed
+                // the peer with any keys held across the crossover, then send
+                // CaptureBegin with the cursor height.
+                let (from_bottom, height) = injector.cursor_from_forward_edge();
+                log::info!(
+                    "cursor crossed forward (from_bottom={from_bottom:.0}, height={height:.0})"
+                );
+                let held = injector.held_keys();
+                injector.release_all_keys();
+                if let Some(d) = downstream.as_ref() {
+                    for code in held {
+                        d.try_send(Event::KeyPress { code });
+                    }
+                    d.try_send(Event::CaptureBegin {
+                        from_bottom,
+                        source_height: height,
+                    });
+                }
+                mode = Mode::Forwarding;
+                continue;
+            }
+
+            if outcome == EdgeHit::Return {
                 // Cursor returned to sender. Drain events until we get
                 // CaptureEnd to avoid sending duplicate ReturnToSender
                 // from buffered mouse motion events.
@@ -555,26 +760,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Returns true if ReturnToSender was sent (caller should drain until CaptureEnd).
+/// Inject one event locally. Returns which crossover edge the cursor reached,
+/// if any. `EdgeHit::Return` means `ReturnToSender` has already been sent and
+/// the caller should drain until `CaptureEnd`; `EdgeHit::Forward` means the
+/// caller should hand the cursor to the downstream peer.
 async fn handle_event(
     injector: &mut Injector,
     transport: &mut ReceiverTransport,
     last_clip_hash: &mut u64,
     event: Event,
-) -> bool {
+) -> EdgeHit {
     match event {
         Event::MouseMotion { dx, dy } => {
-            let hit_edge = injector.inject_mouse_motion(dx, dy);
-            if hit_edge {
-                let (from_bottom, source_height) = injector.cursor_from_bottom();
-                log::info!("cursor hit return edge (from_bottom={from_bottom:.0}, height={source_height:.0})");
-                injector.release_all_keys();
-                // Clipboard stays in sync via the proactive_clipboard_poll
-                // task, so no read happens here. This avoids the
-                // pasteboard-not-yet-settled race when the user hits
-                // Cmd+C and immediately crosses back.
-                let _ = transport.send(&Event::ReturnToSender { from_bottom, source_height }).await;
-                return true;
+            match injector.inject_mouse_motion(dx, dy) {
+                EdgeHit::Return => {
+                    let (from_bottom, source_height) = injector.cursor_from_bottom();
+                    log::info!("cursor hit return edge (from_bottom={from_bottom:.0}, height={source_height:.0})");
+                    injector.release_all_keys();
+                    // Clipboard stays in sync via the proactive_clipboard_poll
+                    // task, so no read happens here. This avoids the
+                    // pasteboard-not-yet-settled race when the user hits
+                    // Cmd+C and immediately crosses back.
+                    let _ = transport.send(&Event::ReturnToSender { from_bottom, source_height }).await;
+                    return EdgeHit::Return;
+                }
+                EdgeHit::Forward => return EdgeHit::Forward,
+                EdgeHit::None => {}
             }
         }
         Event::MouseButton { button, state } => {
@@ -634,7 +845,7 @@ async fn handle_event(
         }
         Event::ReturnToSender { .. } | Event::HeartbeatAck => {}
     }
-    false
+    EdgeHit::None
 }
 
 /// Polls `NSPasteboard.changeCount` at 10 Hz. On every bump, reads the

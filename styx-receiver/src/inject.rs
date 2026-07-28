@@ -14,7 +14,7 @@ use core_graphics::geometry::CGPoint;
 use styx_keymap;
 
 use crate::geometry::{
-    self, DisplayBounds, Edge, EdgeSpan, clamp_to_displays, resolve_edge_hit, span_of_displays,
+    self, DisplayBounds, Edge, EdgeConfig, EdgeHit, EdgeSpan, span_of_displays,
 };
 
 const K_IOPM_USER_ACTIVE_LOCAL: u32 = 0;
@@ -42,6 +42,13 @@ pub struct Injector {
     edge_displays: Vec<DisplayBounds>,
     edge_span: EdgeSpan,
     return_edge: Edge,
+    /// Edge facing the downstream peer, when this mac relays. `None` on a
+    /// terminal receiver.
+    forward: Option<EdgeConfig>,
+    /// Whether the downstream link is currently healthy. While false the
+    /// forward edge is not passed to `resolve_motion` at all, so behaviour is
+    /// identical to a mac with no relay configured.
+    forward_armed: bool,
     swap_alt_cmd: bool,
     assertion_name: CFString,
     assertion_id: u32,
@@ -91,7 +98,11 @@ const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
 impl Injector {
-    pub fn new(return_edge: Edge, swap_alt_cmd: bool) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        return_edge: Edge,
+        swap_alt_cmd: bool,
+        forward_edge: Option<Edge>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .map_err(|_| "failed to create CGEventSource")?;
 
@@ -99,6 +110,18 @@ impl Injector {
         let displays = compute_all_displays();
         let edge_displays = compute_edge_displays(return_edge);
         let edge_span = span_of_displays(&edge_displays, return_edge);
+
+        let forward = match forward_edge {
+            Some(e) if e == return_edge => {
+                return Err(format!(
+                    "forward_edge and return_edge are both '{e:?}'; they must be different sides"
+                )
+                .into());
+            }
+            Some(e) => Some(EdgeConfig::build(&displays, e)),
+            None => None,
+        };
+
         log::info!(
             "display bounds: x=[{}, {}] y=[{}, {}], edge displays: {}, edge span: [{}, {}]",
             bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y,
@@ -127,6 +150,8 @@ impl Injector {
             edge_displays,
             edge_span,
             return_edge,
+            forward,
+            forward_armed: false,
             swap_alt_cmd,
             assertion_name: CFString::new("styx-receiver"),
             assertion_id: 0,
@@ -159,6 +184,9 @@ impl Injector {
         self.displays = compute_all_displays();
         self.edge_displays = compute_edge_displays(self.return_edge);
         self.edge_span = span_of_displays(&self.edge_displays, self.return_edge);
+        if let Some(f) = self.forward.as_ref() {
+            self.forward = Some(EdgeConfig::build(&self.displays, f.edge));
+        }
         log::info!(
             "reinit: display bounds: x=[{}, {}] y=[{}, {}], edge displays: {}, edge span: [{}, {}]",
             self.display_bounds.min_x, self.display_bounds.max_x,
@@ -169,35 +197,33 @@ impl Injector {
     }
 
     /// Returns true if the cursor hit the return edge.
-    pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
+    pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> EdgeHit {
         self.declare_user_activity();
-        // Clamp against the *union* of displays, not the global bounding box.
-        // The bounding box can include phantom regions that belong to no
-        // display (e.g. directly below a short built-in panel when a taller
-        // monitor sits beside it). A cursor parked in such a region never
-        // satisfies the Dock's per-display bottom-edge reveal test, because it
-        // is below the panel's real bottom edge rather than on it. Snapping to
-        // the nearest on-display point reproduces what macOS does for real HID
-        // input. Falls back to the global box only if the display list is empty.
-        let target_x = self.cursor_pos.x + dx;
-        let target_y = self.cursor_pos.y + dy;
-        let (clamped_x, clamped_y) = if self.displays.is_empty() {
-            (
-                target_x.clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0),
-                target_y.clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0),
-            )
-        } else {
-            clamp_to_displays(&self.displays, target_x, target_y)
+        // Clamp against the *union* of displays, not the global bounding box,
+        // then resolve the crossover edges. Both steps live in `geometry` so
+        // the macOS and Linux backends cannot drift apart, and so the logic is
+        // testable off a Mac.
+        //
+        // The forward edge is passed only while the downstream link is
+        // healthy; when it is not, this call is argument-for-argument what it
+        // was before the relay existed.
+        let ret = EdgeConfig {
+            edge: self.return_edge,
+            displays: self.edge_displays.clone(),
+            span: self.edge_span,
         };
+        let forward = if self.forward_armed { self.forward.as_ref() } else { None };
 
-        // Decide whether the cursor has reached the outer return edge, and
-        // pin it to that edge if so. See `resolve_edge_hit` for why this is
-        // done against the specific edge display rather than the global
-        // bounding box.
-        let (new_x, new_y, hit) =
-            resolve_edge_hit(&self.edge_displays, self.return_edge, clamped_x, clamped_y);
+        let (pos, hit) = geometry::resolve_motion(
+            &self.displays,
+            self.display_bounds,
+            &ret,
+            forward,
+            (self.cursor_pos.x, self.cursor_pos.y),
+            (dx, dy),
+        );
 
-        self.cursor_pos = CGPoint::new(new_x, new_y);
+        self.cursor_pos = CGPoint::new(pos.0, pos.1);
 
         let event_type = if self.button_state.left.pressed {
             CGEventType::LeftMouseDragged
@@ -379,6 +405,40 @@ impl Injector {
             from_bottom,
         ) {
             self.cursor_pos = CGPoint::new(x, y);
+        }
+    }
+
+    /// Arm or disarm the forward edge. Driven by downstream link health.
+    pub fn set_forward_armed(&mut self, armed: bool) {
+        self.forward_armed = armed;
+    }
+
+    /// Keys currently held, for seeding state on the downstream peer when the
+    /// cursor crosses forward mid-chord.
+    pub fn held_keys(&self) -> Vec<u32> {
+        self.held_keys.iter().copied().collect()
+    }
+
+    /// Place the cursor at the forward edge, `from_bottom` up from the bottom
+    /// of that edge's span. Used when the downstream peer hands the cursor
+    /// back.
+    pub fn place_cursor_at_forward_edge(&mut self, from_bottom: f64) {
+        let Some(f) = self.forward.as_ref() else { return };
+        if let Some((x, y)) =
+            geometry::place_from_bottom(&f.displays, f.span, f.edge, from_bottom)
+        {
+            self.cursor_pos = CGPoint::new(x, y);
+        }
+    }
+
+    /// Cursor offset along the forward edge, for the `CaptureBegin` sent
+    /// downstream.
+    pub fn cursor_from_forward_edge(&self) -> (f64, f64) {
+        match self.forward.as_ref() {
+            Some(f) => {
+                geometry::from_bottom_of(f.span, f.edge, self.cursor_pos.x, self.cursor_pos.y)
+            }
+            None => (0.0, 0.0),
         }
     }
 

@@ -241,6 +241,77 @@ pub fn from_bottom_of(edge_span: EdgeSpan, return_edge: Edge, x: f64, y: f64) ->
     (from_bottom, height)
 }
 
+/// Which edge, if any, the cursor reached on this motion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeHit {
+    /// Ordinary motion; the cursor stayed on this machine.
+    None,
+    /// The cursor reached the edge facing the upstream sender.
+    Return,
+    /// The cursor reached the edge facing the downstream peer.
+    Forward,
+}
+
+/// One crossover edge: which side it is, which displays own it, and their
+/// unioned span along the parallel axis.
+#[derive(Debug, Clone)]
+pub struct EdgeConfig {
+    pub edge: Edge,
+    pub displays: Vec<DisplayBounds>,
+    pub span: EdgeSpan,
+}
+
+impl EdgeConfig {
+    pub fn build(all: &[DisplayBounds], edge: Edge) -> Self {
+        let displays = edge_displays_of(all, edge);
+        let span = span_of_displays(&displays, edge);
+        EdgeConfig { edge, displays, span }
+    }
+}
+
+/// Resolve one motion step: clamp to the display union, then decide whether
+/// the cursor reached a crossover edge, pinning it there if so.
+///
+/// `forward` is `Some` only when the downstream link is healthy. Passing
+/// `None` makes this collapse to exactly the return-edge-only behaviour that
+/// predates the relay -- the degradation guarantee is therefore structural
+/// rather than a promise: a disarmed forward edge is not a branch that might
+/// misbehave, it is an argument that is not there.
+///
+/// The forward edge is tested first. The two edges are required to differ at
+/// construction, so no position can satisfy both, and the order only settles
+/// the degenerate single-display case where a caller ignored that rule.
+pub fn resolve_motion(
+    displays: &[DisplayBounds],
+    fallback: DisplayBounds,
+    ret: &EdgeConfig,
+    forward: Option<&EdgeConfig>,
+    cursor: (f64, f64),
+    delta: (f64, f64),
+) -> ((f64, f64), EdgeHit) {
+    let target_x = cursor.0 + delta.0;
+    let target_y = cursor.1 + delta.1;
+
+    let (cx, cy) = if displays.is_empty() {
+        (
+            target_x.clamp(fallback.min_x, fallback.max_x - 1.0),
+            target_y.clamp(fallback.min_y, fallback.max_y - 1.0),
+        )
+    } else {
+        clamp_to_displays(displays, target_x, target_y)
+    };
+
+    if let Some(f) = forward {
+        let (fx, fy, hit) = resolve_edge_hit(&f.displays, f.edge, cx, cy);
+        if hit {
+            return ((fx, fy), EdgeHit::Forward);
+        }
+    }
+
+    let (rx, ry, hit) = resolve_edge_hit(&ret.displays, ret.edge, cx, cy);
+    ((rx, ry), if hit { EdgeHit::Return } else { EdgeHit::None })
+}
+
 /// Bounding box over every display. Used only as a fallback when the
 /// per-display list is empty.
 pub fn bounding_box(displays: &[DisplayBounds]) -> DisplayBounds {
@@ -511,5 +582,101 @@ mod tests {
     fn bounding_box_empty_is_default() {
         let b = bounding_box(&[]);
         assert_eq!((b.max_x, b.max_y), (1920.0, 1080.0));
+    }
+
+    // --- resolve_motion: relay edge handling ---
+    //
+    // The mac's layout for these: a single display, right edge facing the
+    // workstation (return), left edge facing the laptop (forward).
+
+    fn mac() -> Vec<DisplayBounds> {
+        vec![db(0.0, 0.0, 1470.0, 956.0)]
+    }
+
+    fn cfgs() -> (EdgeConfig, EdgeConfig) {
+        let d = mac();
+        (
+            EdgeConfig::build(&d, Edge::Right),
+            EdgeConfig::build(&d, Edge::Left),
+        )
+    }
+
+    // THE DEGRADATION GUARANTEE. With the downstream link down the forward
+    // argument is None, and pushing left must pin the cursor at x=0 with no
+    // crossover -- byte-identical to the pre-relay behaviour.
+    #[test]
+    fn disarmed_forward_edge_pins_and_does_not_cross() {
+        let d = mac();
+        let (ret, _fwd) = cfgs();
+        let (pos, hit) = resolve_motion(&d, bounding_box(&d), &ret, None, (100.0, 500.0), (-500.0, 0.0));
+        assert_eq!(hit, EdgeHit::None, "must not cross with the link down");
+        assert_eq!(pos.0, 0.0, "cursor pins at the left edge as it does today");
+    }
+
+    // Armed, the same motion crosses.
+    #[test]
+    fn armed_forward_edge_crosses() {
+        let d = mac();
+        let (ret, fwd) = cfgs();
+        let (pos, hit) = resolve_motion(&d, bounding_box(&d), &ret, Some(&fwd), (100.0, 500.0), (-500.0, 0.0));
+        assert_eq!(hit, EdgeHit::Forward);
+        assert_eq!(pos.0, 0.0);
+    }
+
+    // The return edge keeps working regardless of the forward edge's state.
+    #[test]
+    fn return_edge_unaffected_by_arming() {
+        let d = mac();
+        let (ret, fwd) = cfgs();
+        for forward in [None, Some(&fwd)] {
+            let (_pos, hit) = resolve_motion(&d, bounding_box(&d), &ret, forward, (1400.0, 500.0), (500.0, 0.0));
+            assert_eq!(hit, EdgeHit::Return, "return edge must fire either way");
+        }
+    }
+
+    // Interior motion is never a crossover, armed or not.
+    #[test]
+    fn interior_motion_never_crosses() {
+        let d = mac();
+        let (ret, fwd) = cfgs();
+        let (pos, hit) = resolve_motion(&d, bounding_box(&d), &ret, Some(&fwd), (700.0, 400.0), (10.0, 10.0));
+        assert_eq!(hit, EdgeHit::None);
+        assert_eq!(pos, (710.0, 410.0));
+    }
+
+    // Arming the forward edge must not change where ordinary motion lands.
+    #[test]
+    fn arming_does_not_perturb_ordinary_motion() {
+        let d = mac();
+        let (ret, fwd) = cfgs();
+        let a = resolve_motion(&d, bounding_box(&d), &ret, None, (700.0, 400.0), (5.0, -5.0));
+        let b = resolve_motion(&d, bounding_box(&d), &ret, Some(&fwd), (700.0, 400.0), (5.0, -5.0));
+        assert_eq!(a, b);
+    }
+
+    // A crossover height must survive the round trip through the forward
+    // edge, so leaving and returning land at the same place.
+    #[test]
+    fn forward_edge_height_round_trips() {
+        let d = mac();
+        let (_ret, fwd) = cfgs();
+        for from_bottom in [0.0, 200.0, 955.0] {
+            let (x, y) = place_from_bottom(&fwd.displays, fwd.span, fwd.edge, from_bottom).unwrap();
+            let (back, _h) = from_bottom_of(fwd.span, fwd.edge, x, y);
+            assert!((back - from_bottom).abs() <= 1.0, "{from_bottom} -> {back}");
+        }
+    }
+
+    // Stacked displays: the forward edge spans both, mirroring the return
+    // edge's behaviour on the same layout.
+    #[test]
+    fn forward_edge_spans_stacked_displays() {
+        let d = vec![
+            db(0.0, 0.0, 1470.0, 956.0),
+            db(0.0, -2560.0, 1440.0, 0.0),
+        ];
+        let fwd = EdgeConfig::build(&d, Edge::Left);
+        assert_eq!(fwd.displays.len(), 2, "both share the left edge at x=0");
+        assert_eq!((fwd.span.min, fwd.span.max), (-2560.0, 956.0));
     }
 }
