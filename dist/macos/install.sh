@@ -22,6 +22,45 @@ APP_DIR="/Applications/Styx Receiver.app"
 PLIST_NAME="com.ghreprimand.styx-receiver.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 
+# Locate cargo.
+#
+# This script runs under /bin/sh but inherits PATH from the invoking shell.
+# rustup's installer appends to ~/.cargo/env, which is POSIX-shell syntax that
+# fish never sources, so a fish login shell can have a perfectly good toolchain
+# that is simply not on PATH. Check the usual install locations before giving
+# up, rather than failing with a bare "cargo: command not found".
+if ! command -v cargo >/dev/null 2>&1; then
+    for candidate in \
+        "$HOME/.cargo/bin/cargo" \
+        /opt/homebrew/bin/cargo \
+        /usr/local/bin/cargo
+    do
+        if [ -x "$candidate" ]; then
+            # Parameter expansion rather than dirname: this block exists
+            # precisely because PATH may be wrong, so it must not depend on
+            # finding an external command to repair PATH.
+            PATH="${candidate%/*}:$PATH"
+            export PATH
+            echo "Found cargo at $candidate"
+            break
+        fi
+    done
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "error: cargo not found." >&2
+    echo >&2
+    echo "Install a Rust toolchain, then re-run this script:" >&2
+    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
+    echo >&2
+    echo "If rust is already installed, its bin directory is not on PATH." >&2
+    echo "For fish, which does not read ~/.cargo/env:" >&2
+    echo "  fish_add_path ~/.cargo/bin" >&2
+    echo "For bash or zsh:" >&2
+    echo "  . \"\$HOME/.cargo/env\"" >&2
+    exit 1
+fi
+
 # Build
 echo "Building styx-receiver..."
 cd "$REPO_DIR"
