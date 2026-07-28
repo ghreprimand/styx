@@ -313,21 +313,85 @@ so this is a few lines rather than a fork.
 
 ## Clipboard in a three-node chain
 
-The existing dedup is a single `last_clip_hash` per node, which is correct for
-two nodes and wrong for three: content arriving from upstream is written to the
-Mac's pasteboard, the 10 Hz `NSPasteboard.changeCount` poll observes the change,
-and forwards it back out — potentially into a ping-pong across three nodes.
+**Implemented.** This section previously recommended deferring clipboard relay;
+it now describes what shipped.
 
-Minimum viable fix: track the last-seen hash **per link** rather than per node,
-and never re-emit content on the link it arrived from. The type-prefixed
-hashing already in `clipboard.rs` (distinct kind bytes for text, image, HTML)
-carries over unchanged.
+### The rule
 
-Recommendation: **defer clipboard relay entirely for the first implementation.**
-Get the input path correct with clipboard forwarding disabled on the
-Mac→laptop hop, then add it as a separate change with its own tests. A stuck
-key is annoying; a clipboard loop that overwrites content on three machines is
-data loss.
+Clipboard is the one payload in styx that is not *addressed* to a machine.
+Input flows outward from whichever machine holds the keyboard, but a copy made
+anywhere should paste everywhere. So clipboard is handled before the mode
+dispatch, and converges regardless of where the cursor is or whether a sender
+is even connected.
+
+One rule governs it:
+
+> A clipboard payload is written to the local clipboard and re-emitted on
+> **every link except the one it arrived on.**
+
+That is `clip_targets` in `styx-receiver/src/main.rs`, a pure function over
+`ClipOrigin` (`Local`, `Upstream`, `Downstream`), unit-tested independently of
+sockets and clipboards.
+
+### Why that terminates
+
+The nodes form a line, so the graph is **acyclic**. A payload travels outward
+from wherever it was copied and stops when it runs out of machines. Ingress
+suppression alone is sufficient; no hop counter or message ID is needed.
+
+`last_clip_hash` is a second, independent guard. It stops a payload that
+somehow returns, and — more importantly in practice — it stops a node's own
+proactive poll from re-originating content that the node just *wrote* rather
+than copied. The node records the hash before writing, so when the poll reads
+the same bytes back it recognises them and stays quiet.
+
+### The subtle part: lossy writes
+
+The original per-link-hash proposal turned out to be unnecessary. The real
+hazard was different, and it existed in the two-node setup already.
+
+`wl-copy` accepts a single MIME type per invocation, so a `ClipboardHtml`
+payload lands on a Linux node as **plain text** — the rich half is dropped. If
+the node records `hash_html(html, plain)` after that write, its dedup state
+describes content it does not have. The next poll reads plain text, hashes it
+differently, concludes the user made a fresh copy, and ships the degraded text
+back out — silently replacing the *newer, richer* clipboard on the machine that
+sent it. Copy formatted text on the Mac, cross to Linux and back, and the
+formatting is gone.
+
+The fix is `hash_html_as_written`, which each platform's clipboard module
+implements for itself: identity on macOS, where NSPasteboard carries
+`public.html` and `public.utf8-plain-text` side by side, and `hash_text(body)`
+on Linux, where only the body survives. Recording that hash makes a lossy write
+a **fixed point**, so content stops at the node instead of echoing back
+downgraded. The node still forwards the *original* rich payload onward, so a
+downstream macOS node receives the formatting even though the relay node itself
+could not keep it.
+
+### Backpressure policy differs from input
+
+`DownstreamLink` has two send paths, and the difference is deliberate:
+
+| | on a full queue | rationale |
+|---|---|---|
+| `try_send` (input) | marks the link unhealthy, forcing cursor recovery | a dropped key event leaves a modifier stuck down and the session unusable |
+| `try_send_lossy` (clipboard) | drops the payload | a dropped copy costs one Cmd+C; the next copy supersedes it |
+
+Routing clipboard through `try_send` would let a large image burst disarm the
+forward edge and yank the cursor back mid-sentence.
+
+### With no sender connected
+
+The node drains its downstream link while waiting for an upstream connection.
+This is not an optimisation. The inbound queue is bounded at 256; if nothing
+reads it, the link task blocks writing into it, stops answering heartbeats, and
+a perfectly healthy peer is torn down for having copied something at the wrong
+moment. That window — workstation off — is exactly when the laptop is most
+likely to be the machine in use.
+
+A copy made on the relay node itself still reaches the downstream peer in that
+state, so Mac→laptop clipboard works with the workstation switched off, even
+though input does not yet.
 
 ## Prerequisite
 

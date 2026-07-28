@@ -463,8 +463,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "received clipboard html from receiver ({} html bytes, {} plain bytes); writing plain",
                                 html.len(), plain.len(),
                             );
-                            last_clip_hash = clipboard::hash_html(&html, &plain);
                             let to_write = if plain.is_empty() { strip_html_tags(&html) } else { plain };
+                            // Record the hash of what actually lands, not of
+                            // what arrived. They differ here because the html
+                            // half is discarded, and recording the payload's
+                            // hash would leave this machine's dedup state
+                            // describing content it does not have: the next
+                            // crossover reads back plain text, hashes it
+                            // differently, mistakes it for a fresh copy, and
+                            // ships the stripped version back to the receiver
+                            // -- replacing the rich clipboard there with the
+                            // degraded copy that came from it.
+                            last_clip_hash = clipboard::hash_text(&to_write);
                             clipboard::write_clipboard(&to_write).await;
                         }
                         Ok(_) => {}

@@ -53,6 +53,63 @@ enum Mode {
     Forwarding,
 }
 
+/// Which link a clipboard payload arrived on.
+///
+/// Clipboard is the one thing in styx that is not directional: input flows
+/// from the machine holding the keyboard outward, but a copy made anywhere
+/// should be pastable everywhere, regardless of where the cursor is. So a
+/// payload is re-emitted on every link *except* this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipOrigin {
+    /// This machine's own clipboard changed, seen by the proactive poll.
+    Local,
+    /// Arrived from the upstream sender.
+    Upstream,
+    /// Arrived from the downstream peer.
+    Downstream,
+}
+
+/// Which links a clipboard payload should be re-emitted on, as
+/// `(upstream, downstream)`.
+///
+/// Never re-emitting on the ingress link is what makes the flood terminate.
+/// The nodes form a line, so the graph is acyclic and a payload simply travels
+/// outward from wherever it was copied until it runs out of machines. The hash
+/// dedup in `sync_clipboard` is a second, independent guard -- it would stop a
+/// loop even if the topology ever grew a cycle.
+///
+/// Pure, so the routing rule is testable without a clipboard, a socket, or a
+/// peer to talk to.
+fn clip_targets(origin: ClipOrigin) -> (bool, bool) {
+    (origin != ClipOrigin::Upstream, origin != ClipOrigin::Downstream)
+}
+
+fn is_clipboard(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::ClipboardData { .. } | Event::ClipboardImage { .. } | Event::ClipboardHtml { .. }
+    )
+}
+
+fn clip_kind(event: &Event) -> &'static str {
+    match event {
+        Event::ClipboardData { .. } => "text",
+        Event::ClipboardImage { .. } => "image",
+        Event::ClipboardHtml { .. } => "html",
+        _ => "none",
+    }
+}
+
+/// Dedup hash for a clipboard payload, or `None` if this is not one.
+fn clip_hash(event: &Event) -> Option<u64> {
+    match event {
+        Event::ClipboardData { text } => Some(clipboard::hash_text(text)),
+        Event::ClipboardImage { format, data } => Some(clipboard::hash_image(format, data)),
+        Event::ClipboardHtml { html, plain } => Some(clipboard::hash_html(html, plain)),
+        _ => None,
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "styx-receiver", about = "Styx software KVM receiver", version)]
 struct Cli {
@@ -507,19 +564,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reinit_timer = time::interval(Duration::from_secs(30));
     reinit_timer.tick().await; // consume the immediate first tick
 
-    loop {
+    'outer: loop {
         // Wait for a connection on any of the bound listeners.
         log::info!("waiting for connection...");
-        let (stream, peer) = tokio::select! {
-            maybe = accept_rx.recv() => match maybe {
-                Some(pair) => pair,
-                None => {
-                    log::error!("all accept tasks exited; no listeners remain");
-                    break;
-                }
-            },
-            _ = sigterm.recv() => break,
-            _ = sigint.recv() => break,
+        let (stream, peer) = 'wait: loop {
+            tokio::select! {
+                maybe = accept_rx.recv() => match maybe {
+                    Some(pair) => break 'wait pair,
+                    None => {
+                        log::error!("all accept tasks exited; no listeners remain");
+                        break 'outer;
+                    }
+                },
+
+                // Keep the clipboard converging with no sender connected.
+                //
+                // Not an optimisation. The downstream link's inbound queue is
+                // bounded; if nothing drains it the link task blocks writing
+                // into it, stops answering heartbeats, and a peer that was
+                // perfectly healthy gets torn down for the crime of copying
+                // something at the wrong moment. This is exactly the window
+                // where the workstation is off, which is when the laptop is
+                // most likely to be the machine being used.
+                Some(event) = async {
+                    match downstream.as_mut() {
+                        Some(d) => d.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if is_clipboard(&event) {
+                        sync_clipboard(
+                            &mut transport,
+                            None,
+                            &mut last_clip_hash,
+                            event,
+                            ClipOrigin::Downstream,
+                        ).await;
+                    }
+                    // Cursor-handover events are meaningless with no upstream
+                    // to hand back to; drop them rather than acting on them.
+                },
+
+                // A copy made here still reaches the downstream peer even
+                // with no sender connected.
+                Some(event) = clip_rx.recv() => {
+                    sync_clipboard(
+                        &mut transport,
+                        downstream.as_ref(),
+                        &mut last_clip_hash,
+                        event,
+                        ClipOrigin::Local,
+                    ).await;
+                },
+
+                _ = sigterm.recv() => break 'outer,
+                _ = sigint.recv() => break 'outer,
+            }
         };
         log::info!("accepted connection from {peer}");
         transport.set_stream(stream);
@@ -568,33 +668,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 },
                 Some(event) = clip_rx.recv() => {
-                    let h = match &event {
-                        Event::ClipboardImage { format, data } => Some(clipboard::hash_image(format, data)),
-                        Event::ClipboardData { text } => Some(clipboard::hash_text(text)),
-                        Event::ClipboardHtml { html, plain } => Some(clipboard::hash_html(html, plain)),
-                        _ => None,
-                    };
-                    if let Some(h) = h {
-                        if h != last_clip_hash {
-                            last_clip_hash = h;
-                            match &event {
-                                Event::ClipboardImage { format, data } => log::info!(
-                                    "proactive clipboard image to sender ({}, {} bytes)",
-                                    format, data.len(),
-                                ),
-                                Event::ClipboardHtml { html, plain } => log::info!(
-                                    "proactive clipboard html to sender ({} html bytes, {} plain bytes)",
-                                    html.len(), plain.len(),
-                                ),
-                                Event::ClipboardData { text } => log::debug!(
-                                    "proactive clipboard text to sender ({} bytes)",
-                                    text.len(),
-                                ),
-                                _ => {}
-                            }
-                            let _ = transport.send(&event).await;
-                        }
-                    }
+                    // A copy made on this machine has no ingress link, so it
+                    // goes out both ways.
+                    sync_clipboard(
+                        &mut transport,
+                        downstream.as_ref(),
+                        &mut last_clip_hash,
+                        event,
+                        ClipOrigin::Local,
+                    ).await;
                     continue;
                 },
                 Some(event) = async {
@@ -605,6 +687,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None => std::future::pending().await,
                     }
                 } => {
+                    // A copy made on the downstream machine travels on up the
+                    // chain. Without this the payload was decoded and dropped,
+                    // which is why the laptop's clipboard went nowhere.
+                    if is_clipboard(&event) {
+                        sync_clipboard(
+                            &mut transport,
+                            downstream.as_ref(),
+                            &mut last_clip_hash,
+                            event,
+                            ClipOrigin::Downstream,
+                        ).await;
+                        continue;
+                    }
                     if let Event::ReturnToSender { from_bottom, source_height } = event {
                         log::info!(
                             "downstream returned cursor (from_bottom={from_bottom:.0}, height={source_height:.0})"
@@ -656,9 +751,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             };
+            // Clipboard is handled before the mode dispatch because it is not
+            // addressed to a machine the way input is: a copy made upstream
+            // belongs on every machine in the chain whether this node is
+            // currently injecting or forwarding.
+            if is_clipboard(&event) {
+                sync_clipboard(
+                    &mut transport,
+                    downstream.as_ref(),
+                    &mut last_clip_hash,
+                    event,
+                    ClipOrigin::Upstream,
+                ).await;
+                continue;
+            }
+
             // While forwarding, this node is a pure router: input events go
             // straight out the downstream link and nothing is injected here.
-            // Clipboard and capture bookkeeping are still handled locally.
+            // Capture bookkeeping is still handled locally.
             if mode == Mode::Forwarding {
                 match event {
                     Event::MouseMotion { .. }
@@ -695,13 +805,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         mode = Mode::Receiving;
                         continue;
                     }
-                    // Clipboard and anything else falls through to the normal
-                    // local handling below.
+                    // Anything else falls through to the normal local
+                    // handling below.
                     _ => {}
                 }
             }
 
-            let outcome = handle_event(&mut injector, &mut transport, &mut last_clip_hash, event).await;
+            let outcome = handle_event(&mut injector, &mut transport, event).await;
 
             if outcome == EdgeHit::Forward {
                 // Cursor reached the edge facing the downstream peer, and the
@@ -760,14 +870,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Converge one clipboard payload across the chain.
+///
+/// Writes it to this machine's clipboard (unless this machine is where it came
+/// from) and re-emits it on every link except the one it arrived on. Every
+/// node runs this, so a copy made on any machine reaches all of them and the
+/// most recent copy is the one they all hold -- which is what makes "whatever
+/// was copied last is what pastes, wherever you are" true rather than
+/// approximately true.
+///
+/// Deliberately independent of `Mode`: clipboard converges whether this node
+/// is injecting, forwarding, or sitting with no sender connected at all.
+async fn sync_clipboard(
+    transport: &mut ReceiverTransport,
+    downstream: Option<&DownstreamLink>,
+    last_clip_hash: &mut u64,
+    event: Event,
+    origin: ClipOrigin,
+) {
+    let Some(hash) = clip_hash(&event) else { return };
+
+    // Already holding this content. Re-emitting it would be an echo, and an
+    // echo on a multi-hop chain is how a single copy turns into a loop.
+    if hash == *last_clip_hash {
+        return;
+    }
+    *last_clip_hash = hash;
+
+    if origin != ClipOrigin::Local {
+        apply_clipboard_locally(&event, last_clip_hash).await;
+    }
+
+    let (to_upstream, to_downstream) = clip_targets(origin);
+    let downstream_target = to_downstream && downstream.is_some();
+
+    if matches!(event, Event::ClipboardData { .. }) {
+        log::debug!(
+            "clipboard text from {origin:?} -> upstream={to_upstream} downstream={downstream_target}",
+        );
+    } else {
+        log::info!(
+            "clipboard {} from {origin:?} -> upstream={to_upstream} downstream={downstream_target}",
+            clip_kind(&event),
+        );
+    }
+
+    if to_upstream {
+        // Fails harmlessly when no sender is connected; the payload has
+        // already landed locally and gone downstream, which is the whole
+        // point of doing this outside the connected path.
+        let _ = transport.send(&event).await;
+    }
+    if downstream_target {
+        if let Some(d) = downstream {
+            d.try_send_lossy(event);
+        }
+    }
+}
+
+/// Put a clipboard payload on this machine's clipboard.
+///
+/// Updates `last_clip_hash` to describe what actually landed, which is not
+/// always what arrived -- see `hash_html_as_written`.
+async fn apply_clipboard_locally(event: &Event, last_clip_hash: &mut u64) {
+    match event {
+        Event::ClipboardData { text } => {
+            clipboard::write_clipboard(text).await;
+        }
+        Event::ClipboardImage { format, data } => {
+            let fmt = format.clone();
+            let data = data.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                clipboard_image::write_clipboard_image(&fmt, &data);
+            })
+            .await;
+        }
+        Event::ClipboardHtml { html, plain } => {
+            // What lands may be less than what arrived: wl-copy holds a single
+            // MIME type, so rich text degrades to plain here. Record the hash
+            // of the *result*, otherwise the next poll reads back something
+            // that hashes differently, mistakes it for a fresh copy, and ships
+            // the degraded text back out over the newer content. On macOS this
+            // is the identity.
+            *last_clip_hash = clipboard::hash_html_as_written(html, plain);
+            let h = html.clone();
+            let p = plain.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                clipboard_image::write_clipboard_html(&h, &p);
+            })
+            .await;
+        }
+        _ => {}
+    }
+}
+
 /// Inject one event locally. Returns which crossover edge the cursor reached,
 /// if any. `EdgeHit::Return` means `ReturnToSender` has already been sent and
 /// the caller should drain until `CaptureEnd`; `EdgeHit::Forward` means the
 /// caller should hand the cursor to the downstream peer.
+///
+/// Clipboard events never reach here -- `sync_clipboard` intercepts them
+/// before the mode dispatch, because unlike input they are not addressed to
+/// one machine.
 async fn handle_event(
     injector: &mut Injector,
     transport: &mut ReceiverTransport,
-    last_clip_hash: &mut u64,
     event: Event,
 ) -> EdgeHit {
     match event {
@@ -811,39 +1018,14 @@ async fn handle_event(
         Event::Heartbeat => {
             let _ = transport.send(&Event::HeartbeatAck).await;
         }
-        Event::ClipboardData { text } => {
-            log::debug!("received clipboard text from sender ({} bytes)", text.len());
-            *last_clip_hash = clipboard::hash_text(&text);
-            clipboard::write_clipboard(&text).await;
-        }
-        Event::ClipboardImage { format, data } => {
-            log::info!(
-                "received clipboard image from sender ({}, {} bytes)",
-                format,
-                data.len(),
-            );
-            *last_clip_hash = clipboard::hash_image(&format, &data);
-            let fmt = format.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                clipboard_image::write_clipboard_image(&fmt, &data);
-            })
-            .await;
-        }
-        Event::ClipboardHtml { html, plain } => {
-            log::info!(
-                "received clipboard html from sender ({} html bytes, {} plain bytes)",
-                html.len(),
-                plain.len(),
-            );
-            *last_clip_hash = clipboard::hash_html(&html, &plain);
-            let h = html.clone();
-            let p = plain.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                clipboard_image::write_clipboard_html(&h, &p);
-            })
-            .await;
-        }
-        Event::ReturnToSender { .. } | Event::HeartbeatAck => {}
+        // Intercepted by sync_clipboard before dispatch; listed so the match
+        // stays exhaustive and a new clipboard variant fails to compile here
+        // rather than being silently ignored.
+        Event::ClipboardData { .. }
+        | Event::ClipboardImage { .. }
+        | Event::ClipboardHtml { .. }
+        | Event::ReturnToSender { .. }
+        | Event::HeartbeatAck => {}
     }
     EdgeHit::None
 }
@@ -915,5 +1097,103 @@ async fn proactive_clipboard_poll(tx: tokio::sync::mpsc::Sender<Event>) {
             // Main loop ended; nothing to do.
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(s: &str) -> Event {
+        Event::ClipboardData { text: s.to_string() }
+    }
+
+    // The loop-freedom property, stated directly. A payload is never sent back
+    // out the link it came in on, so on a chain it travels outward and stops.
+    #[test]
+    fn clipboard_never_echoes_to_its_source() {
+        let (upstream, _) = clip_targets(ClipOrigin::Upstream);
+        assert!(!upstream, "an upstream payload must not be sent back upstream");
+
+        let (_, downstream) = clip_targets(ClipOrigin::Downstream);
+        assert!(!downstream, "a downstream payload must not be sent back downstream");
+    }
+
+    // A copy made on this machine has no ingress link, so it goes both ways.
+    // This is what makes "last machine to copy wins" hold regardless of which
+    // machine did the copying.
+    #[test]
+    fn local_copy_reaches_both_neighbours() {
+        assert_eq!(clip_targets(ClipOrigin::Local), (true, true));
+    }
+
+    // A payload crossing this node keeps travelling in the direction it was
+    // already going, so content copied at either end of the chain reaches the
+    // far end rather than stopping at the middle machine.
+    #[test]
+    fn relayed_clipboard_continues_in_the_same_direction() {
+        assert_eq!(clip_targets(ClipOrigin::Upstream), (false, true));
+        assert_eq!(clip_targets(ClipOrigin::Downstream), (true, false));
+    }
+
+    // Every origin re-emits on exactly the links that are not its own. Stated
+    // as a property so a fourth ClipOrigin cannot be added without deciding
+    // what it forwards to.
+    #[test]
+    fn every_origin_forwards_to_all_other_links() {
+        for origin in [ClipOrigin::Local, ClipOrigin::Upstream, ClipOrigin::Downstream] {
+            let (up, down) = clip_targets(origin);
+            assert_eq!(up, origin != ClipOrigin::Upstream, "{origin:?} upstream");
+            assert_eq!(down, origin != ClipOrigin::Downstream, "{origin:?} downstream");
+        }
+    }
+
+    // Clipboard events must be diverted before the mode dispatch; input events
+    // must not be. Getting this backwards would either strand the clipboard or
+    // route keystrokes into the clipboard path.
+    #[test]
+    fn only_clipboard_events_are_diverted() {
+        assert!(is_clipboard(&text("x")));
+        assert!(is_clipboard(&Event::ClipboardImage {
+            format: "image/png".to_string(),
+            data: vec![1, 2, 3],
+        }));
+        assert!(is_clipboard(&Event::ClipboardHtml {
+            html: "<b>x</b>".to_string(),
+            plain: "x".to_string(),
+        }));
+
+        assert!(!is_clipboard(&Event::MouseMotion { dx: 1.0, dy: 0.0 }));
+        assert!(!is_clipboard(&Event::KeyPress { code: 30 }));
+        assert!(!is_clipboard(&Event::CaptureEnd));
+        assert!(!is_clipboard(&Event::Heartbeat));
+        assert!(!is_clipboard(&Event::ReturnToSender {
+            from_bottom: 0.0,
+            source_height: 1080.0,
+        }));
+    }
+
+    // clip_hash must answer for every variant is_clipboard accepts, or
+    // sync_clipboard would return early and silently drop that payload.
+    #[test]
+    fn clip_hash_answers_for_every_diverted_event() {
+        let clipboard_events = [
+            text("x"),
+            Event::ClipboardImage { format: "image/png".to_string(), data: vec![1] },
+            Event::ClipboardHtml { html: "h".to_string(), plain: "p".to_string() },
+        ];
+        for event in &clipboard_events {
+            assert!(is_clipboard(event));
+            assert!(clip_hash(event).is_some(), "no hash for {event:?}");
+        }
+        assert!(clip_hash(&Event::CaptureEnd).is_none());
+    }
+
+    // The dedup guard: identical content hashes equal, so the second arrival
+    // is recognised as an echo and stops. Different content does not.
+    #[test]
+    fn identical_payloads_hash_equal() {
+        assert_eq!(clip_hash(&text("hello")), clip_hash(&text("hello")));
+        assert_ne!(clip_hash(&text("hello")), clip_hash(&text("world")));
     }
 }
