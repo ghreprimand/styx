@@ -27,7 +27,7 @@ use evdev::{
 };
 
 use crate::geometry::{
-    self, DisplayBounds, Edge, EdgeSpan, clamp_to_displays, resolve_edge_hit, span_of_displays,
+    self, DisplayBounds, Edge, EdgeConfig, EdgeHit, EdgeSpan, span_of_displays,
 };
 
 const BTN_LEFT: u32 = 0x110;
@@ -62,6 +62,13 @@ pub struct Injector {
     edge_displays: Vec<DisplayBounds>,
     edge_span: EdgeSpan,
     return_edge: Edge,
+    /// Edge facing the downstream peer, when this node relays. `None` on a
+    /// terminal receiver.
+    forward: Option<EdgeConfig>,
+    /// Whether the downstream link is currently healthy. While false the
+    /// forward edge is not passed to `resolve_motion` at all, so behaviour is
+    /// identical to a node with no relay configured.
+    forward_armed: bool,
     /// Residual hi-res scroll per axis, so sub-detent deltas accumulate into
     /// whole `REL_WHEEL` clicks instead of being truncated away.
     scroll_residual: (f64, f64),
@@ -78,6 +85,7 @@ impl Injector {
     pub fn new(
         return_edge: Edge,
         displays: Vec<DisplayBounds>,
+        forward_edge: Option<Edge>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if displays.is_empty() {
             return Err("no displays configured; set [[receiver.display]] in the config".into());
@@ -86,6 +94,17 @@ impl Injector {
         let bounds = geometry::bounding_box(&displays);
         let edge_displays = geometry::edge_displays_of(&displays, return_edge);
         let edge_span = span_of_displays(&edge_displays, return_edge);
+
+        let forward = match forward_edge {
+            Some(e) if e == return_edge => {
+                return Err(format!(
+                    "forward_edge and return_edge are both '{e:?}'; they must be different sides"
+                )
+                .into());
+            }
+            Some(e) => Some(EdgeConfig::build(&displays, e)),
+            None => None,
+        };
 
         let pointer = build_pointer_device()?;
         let keyboard = build_keyboard_device()?;
@@ -121,6 +140,8 @@ impl Injector {
             edge_displays,
             edge_span,
             return_edge,
+            forward,
+            forward_armed: false,
             scroll_residual: (0.0, 0.0),
         })
     }
@@ -152,24 +173,61 @@ impl Injector {
     /// Mirrors the macOS backend exactly: accumulate the delta, clamp to the
     /// union of displays, then resolve the edge against the specific display
     /// that owns the cursor's position.
-    pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> bool {
-        let target_x = self.cursor_pos.0 + dx;
-        let target_y = self.cursor_pos.1 + dy;
-        let (clamped_x, clamped_y) = if self.displays.is_empty() {
-            (
-                target_x.clamp(self.display_bounds.min_x, self.display_bounds.max_x - 1.0),
-                target_y.clamp(self.display_bounds.min_y, self.display_bounds.max_y - 1.0),
-            )
-        } else {
-            clamp_to_displays(&self.displays, target_x, target_y)
+    pub fn inject_mouse_motion(&mut self, dx: f64, dy: f64) -> EdgeHit {
+        let ret = EdgeConfig {
+            edge: self.return_edge,
+            displays: self.edge_displays.clone(),
+            span: self.edge_span,
         };
+        let forward = if self.forward_armed { self.forward.as_ref() } else { None };
 
-        let (new_x, new_y, hit) =
-            resolve_edge_hit(&self.edge_displays, self.return_edge, clamped_x, clamped_y);
+        let (pos, hit) = geometry::resolve_motion(
+            &self.displays,
+            self.display_bounds,
+            &ret,
+            forward,
+            self.cursor_pos,
+            (dx, dy),
+        );
 
-        self.cursor_pos = (new_x, new_y);
+        self.cursor_pos = pos;
         self.emit_cursor();
         hit
+    }
+
+    /// Arm or disarm the forward edge. Driven by downstream link health.
+    pub fn set_forward_armed(&mut self, armed: bool) {
+        self.forward_armed = armed;
+    }
+
+    /// Keys currently held, for seeding state on the downstream peer when the
+    /// cursor crosses forward mid-chord.
+    pub fn held_keys(&self) -> Vec<u32> {
+        self.held_keys.iter().copied().collect()
+    }
+
+    /// Place the cursor at the forward edge, `from_bottom` up from the bottom
+    /// of that edge's span. Used when the downstream peer hands the cursor
+    /// back.
+    pub fn place_cursor_at_forward_edge(&mut self, from_bottom: f64) {
+        let Some(f) = self.forward.as_ref() else { return };
+        if let Some((x, y)) =
+            geometry::place_from_bottom(&f.displays, f.span, f.edge, from_bottom)
+        {
+            self.cursor_pos = (x, y);
+            self.emit_cursor();
+        }
+    }
+
+    /// Cursor offset along the forward edge, for the `CaptureBegin` sent
+    /// downstream.
+    pub fn cursor_from_forward_edge(&self) -> (f64, f64) {
+        match self.forward.as_ref() {
+            Some(f) => {
+                geometry::from_bottom_of(f.span, f.edge, self.cursor_pos.0, self.cursor_pos.1)
+            }
+            None => (0.0, 0.0),
+        }
     }
 
     pub fn inject_mouse_button(&mut self, button: u32, state: u8) {
