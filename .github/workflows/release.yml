@@ -1,7 +1,7 @@
-name: Release
+name: Release Relay
 on:
   push:
-    tags: ["v*"]
+    tags: ["relay-v*"]
 
 permissions:
   contents: write
@@ -13,22 +13,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev wayland-protocols libevdev-dev
-      - run: cargo build --release -p styx-sender
+      - run: cargo build --release --locked -p styx-sender -p styx-receiver
+      - run: |
+          mkdir -p release-assets
+          cp target/release/styx-sender release-assets/styx-sender-linux-x86_64
+          cp target/release/styx-receiver release-assets/styx-receiver-linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
-          name: styx-sender-linux-x86_64
-          path: target/release/styx-sender
+          name: styx-relay-linux-x86_64
+          path: release-assets/*
 
   build-macos-arm:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p styx-receiver
+      - run: cargo build --release --locked -p styx-receiver
+      - run: |
+          mkdir -p release-assets
+          cp target/release/styx-receiver release-assets/styx-receiver-macos-arm64
       - uses: actions/upload-artifact@v4
         with:
-          name: styx-receiver-macos-arm64
-          path: target/release/styx-receiver
+          name: styx-relay-macos-arm64
+          path: release-assets/*
 
   release:
     needs: [build-linux, build-macos-arm]
@@ -36,9 +43,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: false
+          make_latest: "false"
           files: |
-            styx-sender-linux-x86_64/styx-sender
-            styx-receiver-macos-arm64/styx-receiver
+            release-assets/*
             LICENSE

@@ -114,6 +114,23 @@ Receiver exits cleanly on any network where none of your `listen_hosts` IPs have
 
 **Distrust everything on the LAN including VPN members.** Not yet supported natively. Planned for 0.6.0 via TLS with client-cert auth. If you need this today, tunnel styx over SSH: `ssh -L` port-forward terminates the TCP on each side and negotiates its own encryption.
 
+## Relay edition
+
+The Relay edition adds Linux receiving and input forwarding through an intermediate
+receiver. Each receiver must restrict its own `listen_hosts` and `allowed_senders`.
+On the terminal receiver, allow the intermediate relay's IP, rather than the origin
+sender's IP: the relay creates the downstream TCP connection.
+
+The relay can inject input into the downstream Linux machine through `/dev/uinput`.
+The standard edition's Linux-to-Mac input direction describes one link, not the whole
+relay chain. Clipboard content is synchronized across connected nodes, so every node
+in the chain must be trusted with it, even while input is being injected elsewhere.
+
+Every hop uses plaintext TCP and source-IP filtering, without cryptographic peer
+authentication. A relay creates another network segment on which input and clipboard
+data can be observed. Apply the existing trusted-network or encrypted-tunnel guidance
+to each hop. No local Mac keyboard/mouse capture is included in this release.
+
 ## Reporting security issues
 
 For problems that should not be discussed in public: open a GitHub security advisory on the styx repository at `https://github.com/ghreprimand/styx/security/advisories/new`. For problems that are routine (config confusion, "how do I harden X"): use regular GitHub issues.

@@ -1,9 +1,9 @@
 # Linux Receiver
 
-> **Branch-only feature.** The Linux receiver lives on `feat/hybrid-relay`. It
-> is not on `main`, where `styx-receiver` is macOS-only. See
-> [relay-topology.md](relay-topology.md) for the three-node design this is the
-> first step toward.
+> **Relay edition feature.** The Linux receiver lives on `feat/hybrid-relay`
+> and is available in `relay-v*` releases. It is not on `main`, where
+> `styx-receiver` is macOS-only. See [relay-topology.md](relay-topology.md) for
+> forwarding configuration and the remaining three-node design work.
 
 Styx on `main` sends input one way: Hyprland Linux to macOS. This branch adds a
 **Linux injection backend** to `styx-receiver`, so a second Linux machine can

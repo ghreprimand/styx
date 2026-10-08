@@ -1,24 +1,26 @@
-pkgname=styx-sender
+pkgname=styx-sender-relay
 pkgver=0.5.8
 pkgrel=1
-pkgdesc="Software KVM sender for sharing keyboard/mouse from Hyprland to macOS"
+pkgdesc="Styx Relay edition sender for sharing keyboard/mouse from Hyprland"
 arch=('x86_64')
 url="https://github.com/ghreprimand/styx"
 license=('GPL-3.0-or-later')
 depends=('glibc' 'wayland' 'gtk4' 'python-gobject')
 optdepends=('wl-clipboard: clipboard sync support')
 makedepends=('rust' 'pkg-config')
-source=("https://github.com/ghreprimand/styx/archive/refs/tags/v${pkgver}.tar.gz")
+provides=("styx-sender=${pkgver}")
+conflicts=('styx-sender')
+source=("https://github.com/ghreprimand/styx/archive/refs/tags/relay-v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {
-    cd "styx-$pkgver"
+    cd "styx-relay-v$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "styx-$pkgver"
+    cd "styx-relay-v$pkgver"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     export CFLAGS="${CFLAGS//-flto=auto/}"
@@ -27,7 +29,7 @@ build() {
 }
 
 package() {
-    cd "styx-$pkgver"
+    cd "styx-relay-v$pkgver"
     install -Dm755 target/release/styx-sender "$pkgdir/usr/bin/styx-sender"
     install -Dm755 tools/styx-sender-gui "$pkgdir/usr/bin/styx-sender-gui"
     install -Dm644 dist/styx-sender.service "$pkgdir/usr/lib/systemd/user/styx-sender.service"

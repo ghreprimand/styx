@@ -4,14 +4,31 @@ A purpose-built software KVM for sharing a keyboard and mouse from a [Hyprland](
 
 Styx is narrow in scope by design. It does one thing: send keyboard and mouse input from a Hyprland Wayland compositor to macOS, with seamless edge-based transitions. It is not a general-purpose KVM, does not support Windows, does not support arbitrary Wayland compositors, and is unidirectional (Linux to Mac only). If you need broader compatibility, use [Input Leap](https://github.com/input-leap/input-leap), [Deskflow](https://github.com/deskflow/deskflow), or [lan-mouse](https://github.com/feschber/lan-mouse).
 
-> **You are on the `feat/hybrid-relay` branch.** It extends styx beyond the
-> single Linux-to-Mac pair described below: `styx-receiver` also builds for
-> Linux here, so a second Linux machine can be a receiving end. See
-> [docs/linux-receiver.md](docs/linux-receiver.md) for setup and
-> [docs/relay-topology.md](docs/relay-topology.md) for the three-node
-> workstation → Mac → laptop design this is the first step toward. The wire
-> protocol is unchanged and the existing Linux-to-Mac path behaves exactly as
-> documented here. None of this is on `main`.
+> **Styx Relay edition (`feat/hybrid-relay`).** This edition adds a Linux
+> receiver, input forwarding through a receiver to a downstream machine, and
+> clipboard sync across the chain. See [docs/linux-receiver.md](docs/linux-receiver.md)
+> for Linux setup and [docs/relay-topology.md](docs/relay-topology.md) for relay
+> configuration and the remaining design work. Input originates from the Linux
+> sender; capturing input from the Mac's own keyboard and mouse is not implemented.
+> The wire protocol is unchanged. These features are separate from standard Styx on `main`.
+
+## Release editions
+
+| Edition | Branch | Release tags | Downloads |
+|---------|--------|--------------|-----------|
+| Standard Styx | `main` | `v0.5.8`, `v0.5.9`, … | Linux sender and macOS receiver |
+| Styx Relay | `feat/hybrid-relay` | `relay-v0.5.8`, `relay-v0.5.9`, … | Linux sender, Linux receiver, and macOS receiver |
+
+Both editions use regular GitHub releases. Standard Styx retains the **Latest**
+label; choose a **Styx Relay** release explicitly for relay support. Relay binaries
+report a version such as `0.5.8+relay` so bug reports identify the edition.
+Fixes from `main` are merged into the relay branch before its releases. Tags identify
+fixed commits and are not moved when either branch changes.
+
+Relay downloads include the platform in each filename. Rename the sender or receiver
+to `styx-sender` or `styx-receiver` when installing it in place of an existing binary.
+Both editions use the same executable and service names; select one edition per installation.
+The `dist/homebrew/styx-receiver.rb` formula installs the standard macOS receiver.
 
 ## Quickstart
 

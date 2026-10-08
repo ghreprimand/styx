@@ -1,9 +1,11 @@
-# Relay Topology (design)
+# Relay Topology
 
-> **Status: design only.** Nothing in this document is implemented. It exists
-> on the `feat/hybrid-relay` branch to record the intended architecture before
-> code is written. `main` is unaffected; styx on `main` remains a strictly
-> two-party, one-directional Linux-to-Mac KVM.
+> **Status: forwarding and clipboard relay implemented in the Relay edition.**
+> Linux receiving, downstream input forwarding, and clipboard synchronization
+> across the chain are implemented on `feat/hybrid-relay`, released under
+> `relay-v*` tags. Originating input from the Mac's own keyboard and mouse remains
+> design work. Sections describing originating mode are proposals, not current
+> behavior. Standard Styx on `main` remains a two-party Linux-to-Mac KVM.
 
 ## Goal
 
@@ -395,12 +397,10 @@ though input does not yet.
 
 ## Prerequisite
 
-None of this is reachable without a **Linux receiver**, which does not exist
-today — `styx-receiver` is macOS-only (`core-graphics` injection,
-`NSPasteboard` clipboard). The receiver needs splitting into platform-gated
-inject backends with a `/dev/uinput` implementation for Linux (the `evdev`
-crate already in the sender's dependencies provides `VirtualDeviceBuilder`).
-The relay is useless until the laptop can receive.
+The **Linux receiver** prerequisite is implemented in the Relay edition.
+`styx-receiver` has platform-gated macOS and `/dev/uinput` Linux injection
+backends. See [linux-receiver.md](linux-receiver.md) for installation and display
+configuration.
 
 ## Suggested sequence
 
