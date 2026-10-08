@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, feat/hybrid-relay]
   pull_request:
   workflow_dispatch:
 
@@ -22,8 +22,11 @@ jobs:
       - run: cargo test -p styx-proto -p styx-keymap
 
   test-receiver:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p styx-receiver
+      - run: cargo test --locked -p styx-receiver

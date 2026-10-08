@@ -1,6 +1,6 @@
 [package]
 name = "styx-receiver"
-version = "0.5.8"
+version = "0.5.8+relay"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

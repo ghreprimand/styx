@@ -76,6 +76,14 @@ return_edge = "right"
 # These keys are ignored by the macOS receiver, so one config file can be
 # shared between both platforms.
 #
+# Optional in the Relay edition: forward input to another receiver.
+# The forward edge must differ from return_edge.
+# [receiver.relay]
+# hosts = ["192.168.1.50"]
+# port = 4242
+# forward_edge = "left"
+# forward_displays = "primary"  # "all" (default) or display at the origin
+#
 # [[receiver.display]]
 # x = 0
 # y = 0

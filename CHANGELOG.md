@@ -2,6 +2,28 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## Relay 0.5.8 — 2026-10-08
+
+Released as **Styx Relay 0.5.8**, tag `relay-v0.5.8`, from `feat/hybrid-relay`.
+This is a separate edition from standard Styx `v0.5.8`.
+
+### Added
+
+- Linux receiver with `/dev/uinput` injection and clipboard support.
+- Receiver-to-receiver input forwarding for a Linux sender → relay → downstream receiver chain.
+- Clipboard synchronization across the chain, including updates originating on any node.
+- Optional primary-display restriction for the relay's forward edge.
+- Separate Linux sender, Linux receiver, and macOS receiver release downloads.
+
+### Fixed
+
+- Includes the standard 0.5.8 monitor removal/reconnection fix, including release of active capture when its monitor disappears.
+
+### Scope
+
+- Input still originates from the Linux sender. Capturing input from the Mac's own keyboard and mouse remains unimplemented.
+- The wire protocol is unchanged. Use the Relay edition on nodes that need Linux receiver or forwarding support.
+
 ## 0.5.8 — 2026-10-08
 
 ### Fixed
