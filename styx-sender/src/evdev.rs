@@ -9,10 +9,11 @@ use tokio::io::unix::AsyncFd;
 
 use styx_proto::Event;
 
+use crate::keys::{DeviceId, KeyInput, KeyOwnership};
+
 pub struct EvdevCapture {
     device: Device,
     synth: VirtualDevice,
-    held_keys: HashSet<u32>,
     keys_at_grab: HashSet<u32>,
     grabbed: bool,
 }
@@ -40,7 +41,6 @@ impl EvdevCapture {
         Ok(EvdevCapture {
             device,
             synth,
-            held_keys: HashSet::new(),
             keys_at_grab: HashSet::new(),
             grabbed: false,
         })
@@ -95,16 +95,6 @@ impl EvdevCapture {
             .collect()
     }
 
-    pub fn release_all(&mut self) -> Vec<Event> {
-        let events: Vec<Event> = self
-            .held_keys
-            .iter()
-            .map(|&code| Event::KeyRelease { code })
-            .collect();
-        self.held_keys.clear();
-        events
-    }
-
     pub fn raw_fd(&self) -> std::os::fd::RawFd {
         self.device.as_raw_fd()
     }
@@ -125,34 +115,19 @@ impl EvdevCapture {
             if let EventSummary::Key(_key_ev, key_code, value) = summary {
                 let code = key_code.0 as u32;
                 match value {
-                    1 => {
-                        self.held_keys.insert(code);
-                        out.push(Event::KeyPress { code });
-                    }
-                    0 => {
-                        self.held_keys.remove(&code);
-                        out.push(Event::KeyRelease { code });
-                    }
-                    2 => {
-                        // Kernel auto-repeat. Forward as another key press
-                        // since macOS doesn't repeat programmatically posted events.
-                        // Suppress repeats for modifier keys -- they cause
-                        // duplicate modifier-down events on macOS which triggers
-                        // unintended shortcuts and special characters.
-                        if !styx_keymap::is_modifier(code) {
-                            out.push(Event::KeyPress { code });
-                        }
-                    }
+                    1 => out.push(KeyInput::Press(code)),
+                    0 => out.push(KeyInput::Release(code)),
+                    2 => out.push(KeyInput::Repeat(code)),
                     _ => {}
                 }
             }
         }
-        ReadResult::Events(out)
+        ReadResult::Keys(out)
     }
 }
 
 pub enum ReadResult {
-    Events(Vec<Event>),
+    Keys(Vec<KeyInput>),
     WouldBlock,
     Lost,
 }
@@ -179,6 +154,7 @@ pub enum KeyboardSource {
 }
 
 struct Keyboard {
+    id: DeviceId,
     /// Canonical /dev/input/eventN path, used to avoid opening a device twice.
     node: PathBuf,
     path: PathBuf,
@@ -188,7 +164,8 @@ struct Keyboard {
 
 pub enum KeyboardRead {
     Events(Vec<Event>),
-    /// A device went away. Carries releases for keys it had held.
+    /// A device went away. Carries releases for keys it was the last
+    /// keyboard holding.
     Lost(Vec<Event>),
 }
 
@@ -199,13 +176,22 @@ pub enum KeyboardRead {
 pub struct KeyboardSet {
     source: KeyboardSource,
     keyboards: Vec<Keyboard>,
+    next_id: DeviceId,
+    /// Keys forwarded to the receiver and which keyboards hold them.
+    keys: KeyOwnership,
     /// Paths that failed to open, so the failure is only logged once.
     failed: HashSet<PathBuf>,
 }
 
 impl KeyboardSet {
     pub fn new(source: KeyboardSource) -> Self {
-        KeyboardSet { source, keyboards: Vec::new(), failed: HashSet::new() }
+        KeyboardSet {
+            source,
+            keyboards: Vec::new(),
+            next_id: 0,
+            keys: KeyOwnership::new(),
+            failed: HashSet::new(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -214,8 +200,10 @@ impl KeyboardSet {
 
     /// Open any wanted keyboards that are not open yet. When `grab` is set,
     /// new devices are grabbed immediately so a keyboard that appears
-    /// mid-capture is captured too.
-    pub fn rescan(&mut self, grab: bool) {
+    /// mid-capture is captured too; the returned presses carry modifiers
+    /// it already holds and must be forwarded to the receiver.
+    pub fn rescan(&mut self, grab: bool) -> Vec<Event> {
+        let mut events = Vec::new();
         let wanted = match &self.source {
             KeyboardSource::Explicit(path) => vec![path.clone()],
             KeyboardSource::Auto => detect_keyboards(),
@@ -242,10 +230,16 @@ impl KeyboardSet {
                     continue;
                 }
             }
+            let id = self.next_id;
+            self.next_id += 1;
+            if grab {
+                events.extend(self.keys.seed(id, &capture.held_modifiers()));
+            }
             self.failed.remove(&path);
             log::info!("capturing keyboard: {}", path.display());
-            self.keyboards.push(Keyboard { node, path, capture, fd });
+            self.keyboards.push(Keyboard { id, node, path, capture, fd });
         }
+        events
     }
 
     /// Grab every keyboard. Devices that fail to grab are dropped; returns
@@ -267,22 +261,18 @@ impl KeyboardSet {
         }
     }
 
-    pub fn held_modifiers(&self) -> Vec<u32> {
-        let mut codes: Vec<u32> = self
-            .keyboards
-            .iter()
-            .flat_map(|k| k.capture.held_modifiers())
-            .collect();
-        codes.sort_unstable();
-        codes.dedup();
-        codes
+    /// Record the modifiers each keyboard holds at crossover and return
+    /// presses for them, so the receiver starts with the same state.
+    pub fn seed_held_modifiers(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        for k in &self.keyboards {
+            events.extend(self.keys.seed(k.id, &k.capture.held_modifiers()));
+        }
+        events
     }
 
     pub fn release_all(&mut self) -> Vec<Event> {
-        self.keyboards
-            .iter_mut()
-            .flat_map(|k| k.capture.release_all())
-            .collect()
+        self.keys.release_all()
     }
 
     /// Wait for key events from any keyboard.
@@ -297,15 +287,22 @@ impl KeyboardSet {
                 };
                 match k.capture.read_events() {
                     ReadResult::WouldBlock => guard.clear_ready(),
-                    ReadResult::Events(events) if events.is_empty() => {}
-                    ReadResult::Events(events) => return Poll::Ready(KeyboardRead::Events(events)),
+                    ReadResult::Keys(inputs) => {
+                        let events: Vec<Event> = inputs
+                            .into_iter()
+                            .filter_map(|input| self.keys.apply(k.id, input))
+                            .collect();
+                        if !events.is_empty() {
+                            return Poll::Ready(KeyboardRead::Events(events));
+                        }
+                    }
                     ReadResult::Lost => break true,
                 }
             };
             if lost {
-                let mut k = self.keyboards.remove(i);
+                let k = self.keyboards.remove(i);
                 log::warn!("keyboard device lost: {}", k.path.display());
-                return Poll::Ready(KeyboardRead::Lost(k.capture.release_all()));
+                return Poll::Ready(KeyboardRead::Lost(self.keys.remove_device(k.id)));
             }
         }
         Poll::Pending
