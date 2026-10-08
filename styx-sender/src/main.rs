@@ -2,6 +2,7 @@ mod capture;
 mod clipboard;
 mod evdev;
 mod hyprland;
+mod keys;
 mod transport;
 
 use std::future::poll_fn;
@@ -257,8 +258,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
 
-                            for code in keyboards.held_modifiers() {
-                                let _ = transport.send(&Event::KeyPress { code }).await;
+                            for event in keyboards.seed_held_modifiers() {
+                                let _ = transport.send(&event).await;
                             }
                             let _ = transport.send(&Event::CaptureBegin { from_bottom, source_height }).await;
                             log::info!("capture active");
@@ -370,7 +371,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 _ = kbd_rescan_interval.tick() => {
-                    keyboards.rescan(capturing);
+                    // A keyboard added mid-capture may already hold
+                    // modifiers; tell the receiver about them.
+                    for event in keyboards.rescan(capturing) {
+                        let _ = transport.send(&event).await;
+                    }
                 }
 
                 result = transport.recv(), if transport.is_connected() => {
