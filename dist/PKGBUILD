@@ -1,5 +1,5 @@
 pkgname=styx-sender-relay
-pkgver=0.5.8
+pkgver=0.5.9
 pkgrel=1
 pkgdesc="Styx Relay edition sender for sharing keyboard/mouse from Hyprland"
 arch=('x86_64')

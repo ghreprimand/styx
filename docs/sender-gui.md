@@ -81,7 +81,7 @@ Use **Refresh Outputs** to list active Hyprland outputs. Use **Use Checked Outpu
 
 ### Keyboard device
 
-The evdev keyboard device path. Leave this empty to let `styx-sender` auto-detect a keyboard. Use **Detect Keyboard** to populate the first matching `/dev/input/by-id/*event*kbd*` device.
+The evdev keyboard device path. Leave this empty to let `styx-sender` capture every keyboard in `/dev/input/by-id/`, including keyboards connected later. Pick a device to restrict capture to that one keyboard. Use **Detect Keyboard** to rescan the list.
 
 ### Heartbeat settings
 

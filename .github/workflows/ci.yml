@@ -13,6 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev wayland-protocols libevdev-dev
       - run: cargo check -p styx-proto -p styx-keymap -p styx-sender
+      - run: cargo test -p styx-sender
 
   test:
     runs-on: ubuntu-latest

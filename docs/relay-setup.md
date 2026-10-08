@@ -26,11 +26,11 @@ on any connected node, independently of which node is receiving input.
 
 Choose a **Styx Relay** release on the [Releases page](https://github.com/ghreprimand/styx/releases).
 Use that edition on all three machines to keep versions and clipboard behavior
-consistent. For Relay 0.5.8, check out the published tag in a separate directory:
+consistent. For Relay 0.5.9, check out the published tag in a separate directory:
 
 ```bash
-git clone --branch relay-v0.5.8 --depth 1 https://github.com/ghreprimand/styx.git styx-relay-0.5.8
-cd styx-relay-0.5.8
+git clone --branch relay-v0.5.9 --depth 1 https://github.com/ghreprimand/styx.git styx-relay-0.5.9
+cd styx-relay-0.5.9
 ```
 
 On the **Linux workstation**, build the sender:
@@ -73,7 +73,7 @@ Release downloads also provide `styx-sender-linux-x86_64`,
 paths. A bare macOS receiver download does not create the signed app bundle
 or launchd setup. Intel Macs build the receiver from source.
 
-Both executables should report `0.5.8+relay` for this release. Stop manually
+Both executables should report `0.5.9+relay` for this release. Stop manually
 launched test instances before starting the installed service; keep one
 sender or receiver instance for each configured role.
 
