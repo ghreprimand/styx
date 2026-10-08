@@ -21,7 +21,7 @@ use std::{
 use tokio::io::unix::AsyncFd;
 
 use wayland_client::{
-    Connection, Dispatch, DispatchError, EventQueue, QueueHandle, WEnum,
+    Connection, Dispatch, DispatchError, EventQueue, Proxy, QueueHandle, WEnum,
     backend::{ReadEventsGuard, WaylandError},
     delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
@@ -101,9 +101,15 @@ struct Globals {
 
 #[derive(Debug, Clone)]
 struct OutputInfo {
+    // wl_registry global name, used to match GlobalRemove on hotplug.
+    global: u32,
+    xdg_output: Option<ZxdgOutputV1>,
+    // Set when the compositor closed our surface on this output; cleared
+    // on the output's next done event. Keeps us from recreating a surface
+    // on an output that is about to be removed.
+    closed: bool,
     name: String,
     description: String,
-    #[allow(dead_code)]
     position: (i32, i32),
     size: (i32, i32),
 }
@@ -112,7 +118,9 @@ struct Window {
     buffer: wl_buffer::WlBuffer,
     surface: WlSurface,
     layer_surface: ZwlrLayerSurfaceV1,
-    #[allow(dead_code)]
+    // Configured monitor name this window was created for.
+    monitor: String,
+    output: WlOutput,
     name: String,
     position: (i32, i32),
     size: (i32, i32),
@@ -141,6 +149,7 @@ struct State {
     qh: QueueHandle<Self>,
     pending_events: VecDeque<CaptureEvent>,
     output_info: Vec<(WlOutput, OutputInfo)>,
+    monitors: Vec<String>,
     scroll_discrete_pending: bool,
     edge: Edge,
     max_from_bottom: Option<f64>,
@@ -220,97 +229,29 @@ impl Capture {
             read_guard: None,
             pending_events: VecDeque::new(),
             output_info: vec![],
+            monitors: monitors.to_vec(),
             scroll_discrete_pending: false,
             edge,
             max_from_bottom: None,
             grab_suppressed_until: None,
         };
 
-        // Read wl_output globals.
+        // Read wl_output globals. The registry handler also requests
+        // xdg_output info for each output as it is announced.
         conn.display().get_registry(&state.qh, ());
         queue.roundtrip(&mut state)?;
-
-        // Query xdg_output info for each output.
-        for (output, _) in state.output_info.iter() {
-            state.g.xdg_output_manager.get_xdg_output(output, &state.qh, output.clone());
-        }
         queue.roundtrip(&mut state)?;
 
         // Create an edge layer surface on each configured monitor.
-        for name in monitors {
-            let (target_output, target_info) = state
-                .output_info
-                .iter()
-                .find(|(_, info)| &info.name == name || info.description.contains(name))
-                .ok_or_else(|| format!("monitor '{}' not found", name))?
-                .clone();
-
-            log::info!(
-                "target monitor: {} ({}x{}) at ({},{})",
-                target_info.name,
-                target_info.size.0,
-                target_info.size.1,
-                target_info.position.0,
-                target_info.position.1,
-            );
-
-            let (width, height) = match edge {
-                Edge::Left | Edge::Right => (1u32, target_info.size.1 as u32),
-                Edge::Top | Edge::Bottom => (target_info.size.0 as u32, 1u32),
-            };
-
-            let mut file = tempfile::tempfile()?;
-            draw_surface(&mut file, width, height);
-
-            let pool = state.g.shm.create_pool(
-                file.as_fd(),
-                (width * height * 4) as i32,
-                &state.qh,
-                (),
-            );
-            let buffer = pool.create_buffer(
-                0,
-                width as i32,
-                height as i32,
-                (width * 4) as i32,
-                wl_shm::Format::Argb8888,
-                &state.qh,
-                (),
-            );
-            let surface = state.g.compositor.create_surface(&state.qh, ());
-            let layer_surface = state.g.layer_shell.get_layer_surface(
-                &surface,
-                Some(&target_output),
-                Layer::Overlay,
-                "styx".into(),
-                &state.qh,
-                (),
-            );
-
-            layer_surface.set_anchor(edge.anchor());
-            layer_surface.set_size(width, height);
-            layer_surface.set_exclusive_zone(-1);
-            layer_surface.set_margin(0, 0, 0, 0);
-            surface.set_input_region(None);
-            surface.commit();
-
-            state.windows.push(Arc::new(Window {
-                buffer,
-                surface,
-                layer_surface,
-                name: target_info.name.clone(),
-                position: target_info.position,
-                size: target_info.size,
-            }));
+        // Surfaces are recreated from the output handlers whenever a
+        // monitor is hotplugged (e.g. powered off by DPMS and back on).
+        state.sync_windows();
+        if let Some(missing) = monitors
+            .iter()
+            .find(|m| !state.windows.iter().any(|w| &w.monitor == *m))
+        {
+            return Err(format!("monitor '{}' not found", missing).into());
         }
-
-        let (span_min, span_max) = combined_span(&state.windows, edge);
-        log::info!(
-            "combined edge span: [{}, {}] (height {})",
-            span_min,
-            span_max,
-            span_max - span_min,
-        );
 
         queue.flush()?;
 
@@ -467,6 +408,129 @@ impl State {
         }
 
         self.focused = false;
+    }
+
+    fn output_done(&mut self, output: &WlOutput) {
+        if let Some((_, info)) = self.output_info.iter_mut().find(|(o, _)| o == output) {
+            info.closed = false;
+        }
+        self.sync_windows();
+    }
+
+    /// Create edge surfaces for any configured monitor that does not have
+    /// one yet and whose output is present with complete xdg_output info.
+    fn sync_windows(&mut self) {
+        let mut changed = false;
+        for monitor in self.monitors.clone() {
+            if self.windows.iter().any(|w| w.monitor == monitor) {
+                continue;
+            }
+            let Some((output, info)) = self
+                .output_info
+                .iter()
+                .find(|(_, info)| {
+                    !info.closed
+                        && info.size != (0, 0)
+                        && (info.name == monitor || info.description.contains(&monitor))
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            match self.create_window(&monitor, &output, &info) {
+                Ok(()) => changed = true,
+                Err(e) => log::error!("failed to create edge surface on {}: {e}", info.name),
+            }
+        }
+        if changed {
+            let (span_min, span_max) = combined_span(&self.windows, self.edge);
+            log::info!(
+                "combined edge span: [{}, {}] (height {})",
+                span_min,
+                span_max,
+                span_max - span_min,
+            );
+        }
+    }
+
+    fn create_window(&mut self, monitor: &str, output: &WlOutput, info: &OutputInfo) -> io::Result<()> {
+        log::info!(
+            "target monitor: {} ({}x{}) at ({},{})",
+            info.name,
+            info.size.0,
+            info.size.1,
+            info.position.0,
+            info.position.1,
+        );
+
+        let (width, height) = match self.edge {
+            Edge::Left | Edge::Right => (1u32, info.size.1 as u32),
+            Edge::Top | Edge::Bottom => (info.size.0 as u32, 1u32),
+        };
+
+        let mut file = tempfile::tempfile()?;
+        draw_surface(&mut file, width, height);
+
+        let pool = self.g.shm.create_pool(file.as_fd(), (width * height * 4) as i32, &self.qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            width as i32,
+            height as i32,
+            (width * 4) as i32,
+            wl_shm::Format::Argb8888,
+            &self.qh,
+            (),
+        );
+        pool.destroy();
+        let surface = self.g.compositor.create_surface(&self.qh, ());
+        let layer_surface = self.g.layer_shell.get_layer_surface(
+            &surface,
+            Some(output),
+            Layer::Overlay,
+            "styx".into(),
+            &self.qh,
+            (),
+        );
+
+        layer_surface.set_anchor(self.edge.anchor());
+        layer_surface.set_size(width, height);
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_margin(0, 0, 0, 0);
+        surface.set_input_region(None);
+        surface.commit();
+
+        self.windows.push(Arc::new(Window {
+            buffer,
+            surface,
+            layer_surface,
+            monitor: monitor.to_string(),
+            output: output.clone(),
+            name: info.name.clone(),
+            position: info.position,
+            size: info.size,
+        }));
+        Ok(())
+    }
+
+    /// Drop edge surfaces matching `pred`. If one of them holds the
+    /// current grab, release it and tell main the capture ended.
+    fn remove_windows(&mut self, pred: impl Fn(&Window) -> bool) {
+        let active_removed = self.active_window.as_ref().is_some_and(|w| pred(w));
+        if active_removed {
+            let was_locked = self.pointer_lock.is_some();
+            self.ungrab();
+            if was_locked {
+                self.pending_events.push_back(CaptureEvent::Released);
+            }
+        }
+        self.windows.retain(|w| {
+            if pred(w) {
+                log::info!("edge surface on {} removed", w.name);
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -712,12 +776,28 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = event {
-            if let Some(window) = state.windows.iter().find(|w| &w.layer_surface == layer_surface) {
-                window.surface.attach(Some(&window.buffer), 0, 0);
-                layer_surface.ack_configure(serial);
-                window.surface.commit();
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+                if let Some(window) = state.windows.iter().find(|w| &w.layer_surface == layer_surface) {
+                    window.surface.attach(Some(&window.buffer), 0, 0);
+                    layer_surface.ack_configure(serial);
+                    window.surface.commit();
+                }
             }
+            zwlr_layer_surface_v1::Event::Closed => {
+                // The compositor closes layer surfaces when their output
+                // goes away. Drop ours; sync_windows recreates it once the
+                // monitor comes back.
+                let Some(window) = state.windows.iter().find(|w| &w.layer_surface == layer_surface) else {
+                    return;
+                };
+                let output = window.output.clone();
+                if let Some((_, info)) = state.output_info.iter_mut().find(|(o, _)| *o == output) {
+                    info.closed = true;
+                }
+                state.remove_windows(|w| &w.layer_surface == layer_surface);
+            }
+            _ => {}
         }
     }
 }
@@ -743,12 +823,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
-            if interface == "wl_output" {
+        match event {
+            wl_registry::Event::Global { name, interface, version } if interface == "wl_output" => {
                 let output: WlOutput = _registry.bind(name, version.min(4), qh, ());
+                let xdg_output = state.g.xdg_output_manager.get_xdg_output(&output, qh, output.clone());
                 state.output_info.push((
                     output,
                     OutputInfo {
+                        global: name,
+                        xdg_output: Some(xdg_output),
+                        closed: false,
                         name: String::new(),
                         description: String::new(),
                         position: (0, 0),
@@ -756,19 +840,41 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     },
                 ));
             }
+            wl_registry::Event::GlobalRemove { name } => {
+                let Some(idx) = state.output_info.iter().position(|(_, info)| info.global == name) else {
+                    return;
+                };
+                let (output, info) = state.output_info.remove(idx);
+                if !info.name.is_empty() {
+                    log::info!("monitor removed: {}", info.name);
+                }
+                state.remove_windows(|w| w.output == output);
+                if let Some(xdg_output) = info.xdg_output {
+                    xdg_output.destroy();
+                }
+                if output.version() >= 3 {
+                    output.release();
+                }
+            }
+            _ => {}
         }
     }
 }
 
 impl Dispatch<WlOutput, ()> for State {
     fn event(
-        _: &mut Self,
-        _: &WlOutput,
-        _: wl_output::Event,
+        state: &mut Self,
+        output: &WlOutput,
+        event: wl_output::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // With xdg_output v3, wl_output.done marks the end of an update
+        // to the xdg_output properties too.
+        if let wl_output::Event::Done = event {
+            state.output_done(output);
+        }
     }
 }
 
@@ -796,6 +902,9 @@ impl Dispatch<ZxdgOutputV1, WlOutput> for State {
             }
             zxdg_output_v1::Event::LogicalSize { width, height } => {
                 info.size = (width, height);
+            }
+            zxdg_output_v1::Event::Done => {
+                state.output_done(output);
             }
             _ => {}
         }
