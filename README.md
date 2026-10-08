@@ -8,10 +8,10 @@ Standard Styx is narrow in scope by design. It sends keyboard and mouse input fr
 
 | Edition | Use it for | Source branch | Release |
 |---------|------------|---------------|---------|
-| Standard Styx | A Hyprland Linux sender controlling a Mac | [`main`](https://github.com/ghreprimand/styx/tree/main) | [`v0.5.8`](https://github.com/ghreprimand/styx/releases/tag/v0.5.8) |
-| Styx Relay | Linux receivers or a chain such as Linux workstation → Mac → Linux laptop, with input forwarding and clipboard sync | [`feat/hybrid-relay`](https://github.com/ghreprimand/styx/tree/feat/hybrid-relay) | [`relay-v0.5.8`](https://github.com/ghreprimand/styx/releases/tag/relay-v0.5.8) |
+| Standard Styx | A Hyprland Linux sender controlling a Mac | [`main`](https://github.com/ghreprimand/styx/tree/main) | [`v0.5.9`](https://github.com/ghreprimand/styx/releases/tag/v0.5.9) |
+| Styx Relay | Linux receivers or a chain such as Linux workstation → Mac → Linux laptop, with input forwarding and clipboard sync | [`feat/hybrid-relay`](https://github.com/ghreprimand/styx/tree/feat/hybrid-relay) | [`relay-v0.5.9`](https://github.com/ghreprimand/styx/releases/tag/relay-v0.5.9) |
 
-Both editions have regular releases on the [Releases page](https://github.com/ghreprimand/styx/releases). Standard Styx carries the **Latest** label; select a **Styx Relay** release explicitly for relay support. Standard tags use `v*`, and Relay tags use `relay-v*`. Relay binaries report a version such as `0.5.8+relay`.
+Both editions have regular releases on the [Releases page](https://github.com/ghreprimand/styx/releases). Standard Styx carries the **Latest** label; select a **Styx Relay** release explicitly for relay support. Standard tags use `v*`, and Relay tags use `relay-v*`. Relay binaries report a version such as `0.5.9+relay`.
 
 In a relay chain, the workstation runs `styx-sender`, the Mac runs `styx-receiver` with a downstream peer configured, and the laptop runs the Linux `styx-receiver`. Input still originates on the Hyprland Linux sender; capturing the Mac's own keyboard and mouse is not implemented.
 
