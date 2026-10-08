@@ -17,7 +17,7 @@ use tokio::time;
 use styx_proto::Event;
 
 use capture::{CaptureEvent, Edge};
-use evdev::{AsyncEvdev, EvdevCapture};
+use evdev::{KeyboardRead, KeyboardSet, KeyboardSource};
 use transport::SenderTransport;
 
 #[derive(Parser)]
@@ -118,23 +118,6 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
     Ok(config)
 }
 
-fn detect_keyboard() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let by_id = std::fs::read_dir("/dev/input/by-id/")?;
-    let mut candidates: Vec<PathBuf> = by_id
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            name.contains("kbd") && name.contains("event") && !name.contains("if0")
-        })
-        .collect();
-    candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no keyboard found in /dev/input/by-id/; set keyboard_device in config".into())
-}
-
 fn resolve_monitors(cfg: &SenderConfig) -> Result<Vec<String>, String> {
     if let Some(list) = &cfg.monitors {
         if list.is_empty() {
@@ -156,13 +139,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let edge = parse_edge(&config.sender.edge)?;
     let monitors = resolve_monitors(&config.sender)?;
 
-    let kbd_path = match &config.sender.keyboard_device {
-        Some(path) => PathBuf::from(path),
-        None => {
-            let detected = detect_keyboard()?;
-            log::info!("auto-detected keyboard: {}", detected.display());
-            detected
-        }
+    let kbd_source = match &config.sender.keyboard_device {
+        Some(path) => KeyboardSource::Explicit(PathBuf::from(path)),
+        None => KeyboardSource::Auto,
     };
 
     let mut hosts: Vec<String> = Vec::new();
@@ -187,11 +166,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut transport = SenderTransport::new(addrs);
     let mut wayland_capture = capture::Capture::new(&monitors, edge)?;
-    let mut evdev_capture = EvdevCapture::open(&kbd_path)?;
-    let mut async_evdev = AsyncEvdev::new(&evdev_capture)?;
-    let mut kbd_available = true;
-    let mut kbd_recover_interval = time::interval(Duration::from_secs(2));
-    kbd_recover_interval.tick().await;
+    let mut keyboards = KeyboardSet::new(kbd_source);
+    keyboards.rescan(false);
+    if keyboards.is_empty() {
+        if let Some(path) = &config.sender.keyboard_device {
+            return Err(format!("failed to open keyboard_device {path}").into());
+        }
+        log::warn!("no keyboard found in /dev/input/by-id/; waiting for one to appear");
+    }
+    // Rescan for keyboards that appear later (hotplug, or a multi-mode
+    // keyboard switching between its dongle and cable).
+    let mut kbd_rescan_interval = time::interval(Duration::from_secs(2));
+    kbd_rescan_interval.tick().await;
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -244,8 +230,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     match event {
                         CaptureEvent::Begin { from_bottom, source_height } => {
-                            if capturing || !kbd_available {
-                                if !kbd_available {
+                            if capturing || keyboards.is_empty() {
+                                if keyboards.is_empty() {
                                     wayland_capture.release();
                                 }
                                 continue;
@@ -264,16 +250,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ));
                             heartbeat_interval.tick().await;
 
-                            if let Err(e) = evdev_capture.grab() {
-                                log::error!("evdev grab failed: {e}");
+                            if !keyboards.grab() {
+                                log::error!("evdev grab failed on every keyboard");
                                 capturing = false;
-                                kbd_available = false;
                                 wayland_capture.release();
-                                log::warn!("keyboard device lost (grab failed)");
                                 continue;
                             }
 
-                            for code in evdev_capture.held_modifiers() {
+                            for code in keyboards.held_modifiers() {
                                 let _ = transport.send(&Event::KeyPress { code }).await;
                             }
                             let _ = transport.send(&Event::CaptureBegin { from_bottom, source_height }).await;
@@ -310,7 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         CaptureEvent::Released => {
                             if capturing {
                                 log::warn!("compositor forced pointer release, ending capture");
-                                release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                                release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
 
                                 let now = time::Instant::now();
                                 let close = force_release_last
@@ -352,7 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if capturing {
                                 if let Err(e) = transport.send(&event).await {
                                     log::error!("send error: {e}");
-                                    release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                                    release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
                                     break; // reconnect
                                 }
                             }
@@ -360,38 +344,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                _ = async_evdev.readable(), if capturing && kbd_available => {
-                    match evdev_capture.read_events() {
-                        Some(events) => {
-                            for event in events {
-                                if let Err(e) = transport.send(&event).await {
-                                    log::error!("send error: {e}");
-                                    release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
-                                    break; // reconnect
-                                }
-                            }
+                read = poll_fn(|cx| keyboards.poll_read(cx)), if capturing => {
+                    let events = match read {
+                        KeyboardRead::Events(events) => events,
+                        // Release whatever the lost keyboard was holding
+                        // so it doesn't stay stuck on the receiver.
+                        KeyboardRead::Lost(releases) => releases,
+                    };
+                    let mut send_failed = false;
+                    for event in events {
+                        if let Err(e) = transport.send(&event).await {
+                            log::error!("send error: {e}");
+                            send_failed = true;
+                            break;
                         }
-                        None => {
-                            log::warn!("keyboard device lost");
-                            release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
-                            kbd_available = false;
-                        }
+                    }
+                    if send_failed {
+                        release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
+                        break; // reconnect
+                    }
+                    if keyboards.is_empty() {
+                        log::warn!("no keyboards left, ending capture");
+                        release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
                     }
                 }
 
-                _ = kbd_recover_interval.tick(), if !kbd_available => {
-                    match EvdevCapture::open(&kbd_path) {
-                        Ok(capture) => match AsyncEvdev::new(&capture) {
-                            Ok(ae) => {
-                                evdev_capture = capture;
-                                async_evdev = ae;
-                                kbd_available = true;
-                                log::info!("keyboard device recovered");
-                            }
-                            Err(e) => log::debug!("keyboard async fd failed: {e}"),
-                        },
-                        Err(_) => {}
-                    }
+                _ = kbd_rescan_interval.tick() => {
+                    keyboards.rescan(capturing);
                 }
 
                 result = transport.recv(), if transport.is_connected() => {
@@ -399,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(Event::ReturnToSender { from_bottom, source_height }) => {
                             wayland_capture.set_max_from_bottom(source_height);
                             log::info!("return signal received (from_bottom={from_bottom:.0})");
-                            release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                            release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
 
                             let mut geoms: Vec<hyprland::MonitorGeometry> = Vec::new();
                             for name in &monitors {
@@ -470,7 +449,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(_) => {}
                         Err(e) => {
                             log::error!("recv error: {e}");
-                            release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                            release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
                             transport.disconnect();
                             time::sleep(Duration::from_secs(1)).await;
                             break; // reconnect
@@ -481,7 +460,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ = heartbeat_interval.tick(), if transport.is_connected() => {
                     if missed_heartbeats >= config.sender.heartbeat.miss_threshold {
                         log::warn!("heartbeat timeout, connection dead");
-                        release_capture(&mut capturing, &mut evdev_capture, &mut wayland_capture, &mut transport).await;
+                        release_capture(&mut capturing, &mut keyboards, &mut wayland_capture, &mut transport).await;
                         transport.disconnect();
                         time::sleep(Duration::from_secs(1)).await;
                         break; // reconnect
@@ -507,12 +486,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Graceful shutdown.
     if capturing {
-        let release_events = evdev_capture.release_all();
+        let release_events = keyboards.release_all();
         for event in &release_events {
             let _ = transport.send(event).await;
         }
         let _ = transport.send(&Event::CaptureEnd).await;
-        let _ = evdev_capture.ungrab();
+        keyboards.ungrab();
     }
     transport.disconnect();
     log::info!("shutdown complete");
@@ -526,7 +505,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn release_capture(
     capturing: &mut bool,
-    evdev: &mut EvdevCapture,
+    keyboards: &mut KeyboardSet,
     wayland: &mut capture::Capture,
     transport: &mut SenderTransport,
 ) {
@@ -535,12 +514,12 @@ async fn release_capture(
     }
     *capturing = false;
 
-    let release_events = evdev.release_all();
+    let release_events = keyboards.release_all();
     for event in &release_events {
         let _ = transport.send(event).await;
     }
     let _ = transport.send(&Event::CaptureEnd).await;
-    let _ = evdev.ungrab();
+    keyboards.ungrab();
     wayland.release();
     log::info!("capture ended");
 }
