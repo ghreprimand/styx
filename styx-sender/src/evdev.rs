@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::task::{Context, Poll};
 
 use evdev::{AttributeSet, Device, EventSummary, EventType, InputEvent, KeyCode};
 use evdev::uinput::VirtualDevice;
@@ -108,14 +109,13 @@ impl EvdevCapture {
         self.device.as_raw_fd()
     }
 
-    /// Returns `Some(events)` on success, `None` if the device is gone.
-    pub fn read_events(&mut self) -> Option<Vec<Event>> {
+    pub fn read_events(&mut self) -> ReadResult {
         let events = match self.device.fetch_events() {
             Ok(events) => events,
-            Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => return Some(vec![]),
+            Err(e) if e.raw_os_error() == Some(libc::EAGAIN) => return ReadResult::WouldBlock,
             Err(e) => {
                 log::warn!("evdev read failed: {e}");
-                return None;
+                return ReadResult::Lost;
             }
         };
 
@@ -147,8 +147,14 @@ impl EvdevCapture {
                 }
             }
         }
-        Some(out)
+        ReadResult::Events(out)
     }
+}
+
+pub enum ReadResult {
+    Events(Vec<Event>),
+    WouldBlock,
+    Lost,
 }
 
 pub struct AsyncEvdev {
@@ -162,12 +168,167 @@ impl AsyncEvdev {
             fd: AsyncFd::new(duped)?,
         })
     }
+}
 
-    pub async fn readable(&self) -> Result<(), std::io::Error> {
-        let mut guard = self.fd.readable().await?;
-        guard.retain_ready();
-        Ok(())
+/// Where the set of captured keyboards comes from.
+pub enum KeyboardSource {
+    /// A single device from `keyboard_device` in the config.
+    Explicit(PathBuf),
+    /// Every keyboard in /dev/input/by-id/, rescanned for hotplug.
+    Auto,
+}
+
+struct Keyboard {
+    /// Canonical /dev/input/eventN path, used to avoid opening a device twice.
+    node: PathBuf,
+    path: PathBuf,
+    capture: EvdevCapture,
+    fd: AsyncEvdev,
+}
+
+pub enum KeyboardRead {
+    Events(Vec<Event>),
+    /// A device went away. Carries releases for keys it had held.
+    Lost(Vec<Event>),
+}
+
+/// All keyboards being captured. Grabs, reads, and releases act on every
+/// device at once, so a keyboard that switches connection mode (e.g. a
+/// tri-mode keyboard moving between its 2.4G dongle and a USB cable)
+/// keeps working without reconfiguration.
+pub struct KeyboardSet {
+    source: KeyboardSource,
+    keyboards: Vec<Keyboard>,
+    /// Paths that failed to open, so the failure is only logged once.
+    failed: HashSet<PathBuf>,
+}
+
+impl KeyboardSet {
+    pub fn new(source: KeyboardSource) -> Self {
+        KeyboardSet { source, keyboards: Vec::new(), failed: HashSet::new() }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.keyboards.is_empty()
+    }
+
+    /// Open any wanted keyboards that are not open yet. When `grab` is set,
+    /// new devices are grabbed immediately so a keyboard that appears
+    /// mid-capture is captured too.
+    pub fn rescan(&mut self, grab: bool) {
+        let wanted = match &self.source {
+            KeyboardSource::Explicit(path) => vec![path.clone()],
+            KeyboardSource::Auto => detect_keyboards(),
+        };
+        for path in wanted {
+            let Ok(node) = std::fs::canonicalize(&path) else { continue };
+            if self.keyboards.iter().any(|k| k.node == node) {
+                continue;
+            }
+            let opened = EvdevCapture::open(&path)
+                .and_then(|capture| Ok((AsyncEvdev::new(&capture)?, capture)));
+            let (fd, mut capture) = match opened {
+                Ok(v) => v,
+                Err(e) => {
+                    if self.failed.insert(path.clone()) {
+                        log::warn!("failed to open keyboard {}: {e}", path.display());
+                    }
+                    continue;
+                }
+            };
+            if grab {
+                if let Err(e) = capture.grab() {
+                    log::warn!("evdev grab failed for {}: {e}", path.display());
+                    continue;
+                }
+            }
+            self.failed.remove(&path);
+            log::info!("capturing keyboard: {}", path.display());
+            self.keyboards.push(Keyboard { node, path, capture, fd });
+        }
+    }
+
+    /// Grab every keyboard. Devices that fail to grab are dropped; returns
+    /// false if none could be grabbed.
+    pub fn grab(&mut self) -> bool {
+        self.keyboards.retain_mut(|k| match k.capture.grab() {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("evdev grab failed for {}, dropping it: {e}", k.path.display());
+                false
+            }
+        });
+        !self.keyboards.is_empty()
+    }
+
+    pub fn ungrab(&mut self) {
+        for k in &mut self.keyboards {
+            let _ = k.capture.ungrab();
+        }
+    }
+
+    pub fn held_modifiers(&self) -> Vec<u32> {
+        let mut codes: Vec<u32> = self
+            .keyboards
+            .iter()
+            .flat_map(|k| k.capture.held_modifiers())
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        codes
+    }
+
+    pub fn release_all(&mut self) -> Vec<Event> {
+        self.keyboards
+            .iter_mut()
+            .flat_map(|k| k.capture.release_all())
+            .collect()
+    }
+
+    /// Wait for key events from any keyboard.
+    pub fn poll_read(&mut self, cx: &mut Context<'_>) -> Poll<KeyboardRead> {
+        for i in 0..self.keyboards.len() {
+            let k = &mut self.keyboards[i];
+            let lost = loop {
+                let mut guard = match k.fd.fd.poll_read_ready(cx) {
+                    Poll::Pending => break false,
+                    Poll::Ready(Err(_)) => break true,
+                    Poll::Ready(Ok(guard)) => guard,
+                };
+                match k.capture.read_events() {
+                    ReadResult::WouldBlock => guard.clear_ready(),
+                    ReadResult::Events(events) if events.is_empty() => {}
+                    ReadResult::Events(events) => return Poll::Ready(KeyboardRead::Events(events)),
+                    ReadResult::Lost => break true,
+                }
+            };
+            if lost {
+                let mut k = self.keyboards.remove(i);
+                log::warn!("keyboard device lost: {}", k.path.display());
+                return Poll::Ready(KeyboardRead::Lost(k.capture.release_all()));
+            }
+        }
+        Poll::Pending
+    }
+}
+
+/// Every keyboard in /dev/input/by-id/. Secondary USB interfaces (`-if0N-`)
+/// are skipped: they are typically the keyboard half of a gaming mouse or
+/// a receiver's extra HID endpoint rather than a real keyboard.
+fn detect_keyboards() -> Vec<PathBuf> {
+    let Ok(by_id) = std::fs::read_dir("/dev/input/by-id/") else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = by_id
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            name.contains("kbd") && name.contains("event") && !name.contains("if0")
+        })
+        .collect();
+    paths.sort();
+    paths
 }
 
 fn dup_fd_nonblock(raw: std::os::fd::RawFd) -> Result<std::os::fd::OwnedFd, std::io::Error> {

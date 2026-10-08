@@ -131,7 +131,7 @@ edge = "left"
 | `monitor` | Hyprland output name where the edge surface is placed (from `hyprctl monitors`). Use this for a single-monitor crossover edge. |
 | `monitors` | (optional) list of Hyprland output names whose `edge` sides together form one virtual crossover edge, e.g. `["HDMI-A-1", "DP-1"]` for two stacked displays sharing a left edge. Exactly one of `monitor` or `monitors` must be set. |
 | `edge` | Which side of the monitor(s) triggers capture: `left`, `right`, `top`, `bottom`. Shared by every entry in `monitors`. |
-| `keyboard_device` | (optional) evdev device path. If omitted, auto-detects the first keyboard in `/dev/input/by-id/` |
+| `keyboard_device` | (optional) evdev device path to capture only that keyboard. If omitted, captures every keyboard in `/dev/input/by-id/` and picks up keyboards connected later |
 
 **Receiver (macOS):**
 
