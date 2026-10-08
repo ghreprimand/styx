@@ -7,6 +7,10 @@
 > design work. Sections describing originating mode are proposals, not current
 > behavior. Standard Styx on `main` remains a two-party Linux-to-Mac KVM.
 
+For installation and current configuration examples, use the
+[Relay setup guide](relay-setup.md). This document includes architecture and
+proposals beyond the current release.
+
 ## Goal
 
 Extend styx from a single sender/receiver pair to a three-node chain:
@@ -99,8 +103,8 @@ Practical implications:
   miss disarms the edge within one interval. The worst case is a brief window
   where the cursor is pinned at the left edge instead of crossing — which is
   the desired failure direction.
-- No `[relay]` section in the Mac's config: the downstream endpoint is never
-  constructed at all, and the binary is functionally identical to 0.5.7.
+- No `[receiver.relay]` section in the Mac's config: the downstream endpoint is
+  never constructed, and input remains local to the receiver.
 
 The reconnect loop for the downstream link must use the sender's existing
 capped exponential backoff (`SenderTransport::connect`, 1s → 30s). A laptop
