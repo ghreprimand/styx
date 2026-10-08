@@ -8,10 +8,10 @@ Standard Styx is narrow in scope by design. It sends keyboard and mouse input fr
 
 | Edition | Use it for | Source branch | Release |
 |---------|------------|---------------|---------|
-| Standard Styx | A Hyprland Linux sender controlling a Mac | [`main`](https://github.com/ghreprimand/styx/tree/main) | [`v0.5.8`](https://github.com/ghreprimand/styx/releases/tag/v0.5.8) |
-| Styx Relay | Linux receivers or a chain such as Linux workstation → Mac → Linux laptop, with input forwarding and clipboard sync | [`feat/hybrid-relay`](https://github.com/ghreprimand/styx/tree/feat/hybrid-relay) | [`relay-v0.5.8`](https://github.com/ghreprimand/styx/releases/tag/relay-v0.5.8) |
+| Standard Styx | A Hyprland Linux sender controlling a Mac | [`main`](https://github.com/ghreprimand/styx/tree/main) | [`v0.5.9`](https://github.com/ghreprimand/styx/releases/tag/v0.5.9) |
+| Styx Relay | Linux receivers or a chain such as Linux workstation → Mac → Linux laptop, with input forwarding and clipboard sync | [`feat/hybrid-relay`](https://github.com/ghreprimand/styx/tree/feat/hybrid-relay) | [`relay-v0.5.9`](https://github.com/ghreprimand/styx/releases/tag/relay-v0.5.9) |
 
-Both editions have regular releases on the [Releases page](https://github.com/ghreprimand/styx/releases). Standard Styx carries the **Latest** label; select a **Styx Relay** release explicitly for relay support. Standard tags use `v*`, and Relay tags use `relay-v*`. Relay binaries report a version such as `0.5.8+relay`.
+Both editions have regular releases on the [Releases page](https://github.com/ghreprimand/styx/releases). Standard Styx carries the **Latest** label; select a **Styx Relay** release explicitly for relay support. Standard tags use `v*`, and Relay tags use `relay-v*`. Relay binaries report a version such as `0.5.9+relay`.
 
 In a relay chain, the workstation runs `styx-sender`, the Mac runs `styx-receiver` with a downstream peer configured, and the laptop runs the Linux `styx-receiver`. Input still originates on the Hyprland Linux sender; capturing the Mac's own keyboard and mouse is not implemented.
 
@@ -146,7 +146,7 @@ edge = "left"
 | `monitor` | Hyprland output name where the edge surface is placed (from `hyprctl monitors`). Use this for a single-monitor crossover edge. |
 | `monitors` | (optional) list of Hyprland output names whose `edge` sides together form one virtual crossover edge, e.g. `["HDMI-A-1", "DP-1"]` for two stacked displays sharing a left edge. Exactly one of `monitor` or `monitors` must be set. |
 | `edge` | Which side of the monitor(s) triggers capture: `left`, `right`, `top`, `bottom`. Shared by every entry in `monitors`. |
-| `keyboard_device` | (optional) evdev device path. If omitted, auto-detects the first keyboard in `/dev/input/by-id/` |
+| `keyboard_device` | (optional) evdev device path to capture only that keyboard. If omitted, captures every keyboard in `/dev/input/by-id/` and picks up keyboards connected later |
 
 **Receiver (macOS):**
 

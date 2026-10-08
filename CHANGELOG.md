@@ -2,6 +2,39 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## Relay 0.5.9 — 2026-10-08
+
+Released as **Styx Relay 0.5.9**, tag `relay-v0.5.9`, from `feat/hybrid-relay`.
+
+### Fixed
+
+- Includes the standard 0.5.9 keyboard mode-switching, hotplug, and shared modifier ownership fixes from [PR #3](https://github.com/ghreprimand/styx/pull/3).
+- Modifiers held before capture or on a keyboard added during capture are synchronized and released correctly when their keyboard disappears. Releasing a key on one keyboard preserves it while another still holds it.
+
+### Compatibility
+
+- No wire-protocol changes. Existing relay configurations remain valid, and explicit `keyboard_device` selection retains single-keyboard capture.
+- Binaries report `0.5.9+relay`. Linux receiving, input forwarding, and clipboard synchronization across the chain remain available. Capturing the Mac's own keyboard and mouse remains unimplemented.
+
+## 0.5.9 — 2026-10-08
+
+### Fixed
+
+- **Typing after a keyboard changes connection mode.** When `keyboard_device` is unset, the sender captures all detected keyboards in `/dev/input/by-id/`, so switching between a keyboard's dongle and wired interfaces continues to work. New devices are detected every two seconds, including during capture. Disconnecting a keyboard releases its keys while capture continues on the remaining keyboards; losing the last keyboard ends capture.
+- **Held modifiers across multiple keyboards.** Per-device key ownership preserves a modifier until every keyboard holding it releases it. Modifiers held at crossover or on a keyboard added during capture are tracked and released correctly when that keyboard disappears. Ten regression tests cover ownership, hotplug modifier state, and repeat behavior.
+- Clear evdev readiness on `EAGAIN` so an idle keyboard waits for new input.
+
+Thanks to [rarthur](https://github.com/rarthur) for [PR #3](https://github.com/ghreprimand/styx/pull/3).
+
+### Changed
+
+- Without an explicit keyboard device, the sender can start with no keyboard connected and wait for one. Explicit `keyboard_device` selection still restricts capture to one device and fails at startup if it cannot be opened.
+- Updated configuration and GUI documentation to describe capture of all detected keyboards.
+
+### Compatibility
+
+- No wire-protocol changes. Compatible with 0.5.8 peers. Set `keyboard_device` to retain single-keyboard capture.
+
 ## Relay 0.5.8 — 2026-10-08
 
 Released as **Styx Relay 0.5.8**, tag `relay-v0.5.8`, from `feat/hybrid-relay`.
