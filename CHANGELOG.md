@@ -2,6 +2,16 @@
 
 All notable changes to styx are documented here. Versions follow semantic versioning: the major version tracks wire-protocol compatibility, the minor version tracks feature additions, the patch version tracks bug fixes and non-breaking tweaks.
 
+## 0.5.8 — 2026-10-08
+
+### Fixed
+
+- **Edge crossing after monitor removal and reconnection.** The sender now tracks output changes and recreates edge surfaces when a configured monitor returns, without requiring a restart. Removing the monitor used for active capture releases keyboard and pointer capture so local input resumes. Thanks to [Aethar01](https://github.com/Aethar01) for [PR #1](https://github.com/ghreprimand/styx/pull/1).
+
+### Compatibility
+
+- No wire-protocol or configuration changes. Compatible with 0.5.7 peers.
+
 ## 0.5.7 — 2026-07-09
 
 ### Changed
