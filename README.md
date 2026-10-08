@@ -2,7 +2,22 @@
 
 A purpose-built software KVM for sharing a keyboard and mouse from a [Hyprland](https://hyprland.org/) Linux machine to a Mac over the local network.
 
-Styx is narrow in scope by design. It does one thing: send keyboard and mouse input from a Hyprland Wayland compositor to macOS, with seamless edge-based transitions. It is not a general-purpose KVM, does not support Windows, does not support arbitrary Wayland compositors, and is unidirectional (Linux to Mac only). If you need broader compatibility, use [Input Leap](https://github.com/input-leap/input-leap), [Deskflow](https://github.com/deskflow/deskflow), or [lan-mouse](https://github.com/feschber/lan-mouse).
+Standard Styx is narrow in scope by design. It sends keyboard and mouse input from a Hyprland Wayland compositor to macOS, with seamless edge-based transitions. The Relay edition adds Linux receivers and receiver-to-receiver forwarding. Neither edition captures input from Windows or arbitrary Wayland compositors. If you need broader capture compatibility, use [Input Leap](https://github.com/input-leap/input-leap), [Deskflow](https://github.com/deskflow/deskflow), or [lan-mouse](https://github.com/feschber/lan-mouse).
+
+## Choose an edition
+
+| Edition | Use it for | Source branch | Release |
+|---------|------------|---------------|---------|
+| Standard Styx | A Hyprland Linux sender controlling a Mac | [`main`](https://github.com/ghreprimand/styx/tree/main) | [`v0.5.8`](https://github.com/ghreprimand/styx/releases/tag/v0.5.8) |
+| Styx Relay | Linux receivers or a chain such as Linux workstation → Mac → Linux laptop, with input forwarding and clipboard sync | [`feat/hybrid-relay`](https://github.com/ghreprimand/styx/tree/feat/hybrid-relay) | [`relay-v0.5.8`](https://github.com/ghreprimand/styx/releases/tag/relay-v0.5.8) |
+
+Both editions have regular releases on the [Releases page](https://github.com/ghreprimand/styx/releases). Standard Styx carries the **Latest** label; select a **Styx Relay** release explicitly for relay support. Standard tags use `v*`, and Relay tags use `relay-v*`. Relay binaries report a version such as `0.5.8+relay`.
+
+In a relay chain, the workstation runs `styx-sender`, the Mac runs `styx-receiver` with a downstream peer configured, and the laptop runs the Linux `styx-receiver`. Input still originates on the Hyprland Linux sender; capturing the Mac's own keyboard and mouse is not implemented.
+
+For Relay installation and configuration, use the [Relay setup guide](https://github.com/ghreprimand/styx/blob/feat/hybrid-relay/docs/relay-setup.md) and [Linux receiver guide](https://github.com/ghreprimand/styx/blob/feat/hybrid-relay/docs/linux-receiver.md). Build from the chosen release tag: the standard Homebrew formula installs the standard receiver. Both editions use the same executable and service names, so select one edition per installation.
+
+The remaining instructions below describe the standard Linux-to-Mac setup.
 
 ## Quickstart
 
